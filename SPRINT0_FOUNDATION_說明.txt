@@ -1,0 +1,38 @@
+Korea Pay Helper V5 — Sprint 0 Foundation
+
+本版目的
+1. 不新增或刪除既有功能。
+2. 不修改 settingsMap、historyMap 或備份 JSON 格式。
+3. 將 App.js 的大型畫面元件拆到獨立檔案，建立後續穩定主幹。
+
+主要調整
+- App.js：約 1014 行縮減為約 541 行。
+- 新增 pages：
+  src/pages/HomePage.jsx
+  src/pages/HistoryPage.jsx
+  src/pages/StatisticsPage.jsx
+  src/pages/SettingsPage.jsx
+- 新增共用外殼與導覽：
+  src/components/common/AppShell.jsx
+  src/components/common/AppHeader.jsx
+  src/components/common/CountrySelector.jsx
+  src/components/common/BottomNavigation.jsx
+- 拆出首頁與策略元件：
+  src/components/home/AmountInputCard.jsx
+  src/components/strategy/StrategyCard.jsx
+- 拆出支付編輯器：
+  src/components/payment/PaymentModal.jsx
+- 新增格式工具：
+  src/utils/formatters.js
+- 保留 Sprint 4 Patch 的 DashboardHeader 與 AdvisorCard。
+
+本機測試
+npm install
+npm run build
+npx cap sync android
+npx cap open android
+
+注意
+- ZIP 不含 node_modules、build、.vercel 與本機 local.properties。
+- 請先備份目前穩定專案，或解壓成新資料夾測試。
+- npm install 時請確認 npm registry 是 https://registry.npmjs.org/

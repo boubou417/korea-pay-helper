@@ -1,0 +1,550 @@
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { exportBackup, readBackupFile } from './services/backup';
+import analyze from './services/analyze';
+import AppShell from './components/common/AppShell';
+import AppHeader from './components/common/AppHeader';
+import CountrySelector from './components/common/CountrySelector';
+import BottomNavigation from './components/common/BottomNavigation';
+import PaymentModal from './components/payment/PaymentModal';
+import HomePage from './pages/HomePage';
+import HistoryPage from './pages/HistoryPage';
+import StatisticsPage from './pages/StatisticsPage';
+import SettingsPage from './pages/SettingsPage';
+
+export default function App() {
+  // 固定頁面 scrollbar（避免切頁左右跳）
+  useEffect(()=>{
+    const prev = document.documentElement.style.overflowY;
+    document.documentElement.style.overflowY = 'scroll';
+    return ()=>{ document.documentElement.style.overflowY = prev; };
+  },[]);
+  const [tab, setTab] = useState('home');
+  // ===== 備份 / 還原（Web + Android APK） =====
+  const handleExport = async () => {
+    const data = {
+      version: 3,
+      createdAt: new Date().toISOString(),
+      settingsMap,
+      historyMap,
+      lastResetMap,
+      country,
+      darkMode,
+      categories
+    };
+
+    try {
+      const result = await exportBackup(data);
+
+      if (result.platform === 'web') {
+        alert(`已匯出備份：${result.fileName}`);
+      }
+    } catch (err) {
+      console.error('Export backup failed:', err);
+      alert('匯出失敗，請確認已安裝最新版本後再試一次。');
+    }
+  };
+
+  const handleImport = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+      const json = await readBackupFile(file);
+
+      if (!window.confirm('匯入會覆蓋目前資料，確定繼續？')) {
+        e.target.value = '';
+        return;
+      }
+
+      setSettingsMap(json.settingsMap);
+      setHistoryMap(json.historyMap);
+      setLastResetMap(json.lastResetMap || { KR:{}, TW:{}, JP:{} });
+      setCategories(json.categories || DEFAULT_CATEGORIES);
+      setCountry(json.country || 'KR');
+      setDarkMode(json.darkMode ?? false);
+
+      alert('匯入成功');
+      window.location.reload();
+    } catch (err) {
+      console.error('Import backup failed:', err);
+      alert(err?.message === 'INVALID_BACKUP' ? '備份格式錯誤' : '讀取失敗');
+    } finally {
+      e.target.value = '';
+    }
+  };
+
+  const handleClearAll = () => {
+    if (!window.confirm('確定清除所有資料？')) return;
+    localStorage.removeItem('categories');
+    localStorage.clear();
+    alert('已清除');
+    window.location.reload();
+  };
+  // ⭐ PWA 安裝提示（簡化版）
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  useEffect(() => {
+    window.addEventListener('beforeinstallprompt', (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+    });
+  }, []);
+
+  const installPWA = async () => {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    setDeferredPrompt(null);
+  };
+  // ⭐ PWA Service Worker 註冊（高級版：有更新提示）
+  const [updateReady, setUpdateReady] = useState(false);
+  const [waitingWorker, setWaitingWorker] = useState(null);
+
+  useEffect(() => {
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/service-worker.js')
+        .then(reg => {
+          console.log('PWA ready');
+
+          reg.update();
+
+          // 若已有等待中的新版本
+          if (reg.waiting) {
+            setWaitingWorker(reg.waiting);
+            setUpdateReady(true);
+          }
+
+          reg.onupdatefound = () => {
+            const newWorker = reg.installing;
+            if (!newWorker) return;
+
+            newWorker.onstatechange = () => {
+              if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+                setWaitingWorker(newWorker);
+                setUpdateReady(true);
+              }
+            };
+          };
+        })
+        .catch(err => console.log('SW error', err));
+    }
+  }, []);
+
+  const applyUpdate = () => {
+    if (!waitingWorker) return;
+    waitingWorker.postMessage({ type: 'SKIP_WAITING' });
+    window.location.reload();
+  };
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('darkMode');
+    return saved ? JSON.parse(saved) : false;
+  });
+  const currencyCodeMap = {
+    KR: 'KRW',
+    TW: 'TWD',
+    JP: 'JPY'
+  };
+  const currencyMap = {
+    KR: '₩',
+    TW: 'NT$',
+    JP: '¥'
+  };
+  const [country, setCountry] = useState(() => localStorage.getItem('country') || 'KR');
+
+  // ⭐ 國旗設定（避免顯示 KR / TW / JP）
+  const flagMap = {
+    KR: '🇰🇷',
+    TW: '🇹🇼',
+    JP: '🇯🇵'
+  };
+
+  // ⭐ 修正：初始化 settingsMap（避免 undefined）
+  const [settingsMap, setSettingsMap] = useState(() => {
+    const saved = localStorage.getItem('settingsMap');
+    return saved ? JSON.parse(saved) : {
+      KR: { exchangeRate: 0.021, payments: [] },
+      TW: { exchangeRate: 1, payments: [] },
+      JP: { exchangeRate: 0.22, payments: [] }
+    };
+  });
+
+  const settings = settingsMap[country];
+  const currencySymbol = currencyMap[country];
+  const setSettings = (updater) => {
+    setSettingsMap(prev=>{
+      const newCountryData = typeof updater === 'function' ? updater(prev[country]) : updater;
+      return { ...prev, [country]: newCountryData };
+    });
+  };
+  const [amount, setAmount] = useState('');
+  const [note, setNote] = useState('');
+  const [category, setCategory] = useState('未分類');
+  const DEFAULT_CATEGORIES = ['未分類','餐飲','超商','網購'];
+  const [categories, setCategories] = useState(() => {
+    try {
+      const saved = localStorage.getItem('categories');
+      return saved ? JSON.parse(saved) : DEFAULT_CATEGORIES;
+    } catch {
+      return DEFAULT_CATEGORIES;
+    }
+  });
+  const [mode, setMode] = useState('all');
+  const [historyMap, setHistoryMap] = useState(() => {
+    const saved = localStorage.getItem('historyMap');
+    return saved ? JSON.parse(saved) : { KR:[], TW:[], JP:[] };
+  });
+
+  const history = historyMap[country];
+  const setHistory = (updater) => {
+    setHistoryMap(prev=>{
+      const newList = typeof updater === 'function' ? updater(prev[country]) : updater;
+      return { ...prev, [country]: newList };
+    });
+  };
+  const [showModal, setShowModal] = useState(false);
+  const [lastResetMap, setLastResetMap] = useState(() => {
+    const saved = localStorage.getItem('lastResetMap');
+    return saved ? JSON.parse(saved) : { KR:{}, TW:{}, JP:{} };
+  });
+  const [editingIndex, setEditingIndex] = useState(null);
+
+  const inputRef = useRef(null);
+  useEffect(()=>{ inputRef.current?.focus(); },[]);
+
+  // ⭐ 自動儲存
+  useEffect(()=>{
+    localStorage.setItem('settingsMap', JSON.stringify(settingsMap));
+    localStorage.setItem('country', country);
+  },[settingsMap, country]);
+
+  useEffect(()=>{
+    localStorage.setItem('historyMap', JSON.stringify(historyMap));
+    localStorage.setItem('lastResetMap', JSON.stringify(lastResetMap));
+  },[historyMap, lastResetMap]);
+
+  useEffect(() => {
+    localStorage.setItem('categories', JSON.stringify(categories));
+  }, [categories]);
+
+  const data = useMemo(()=>{
+    const num = Number(amount);
+    if (!amount || isNaN(num)) return null;
+    return analyze(num, settings, mode);
+  },[amount,settings,mode]);
+
+  const estimatedRemainingReward = useMemo(() => {
+    return settings.payments.reduce((sum, payment) => {
+      const used = Number(payment.used || 0);
+      const bonusEarned = Math.min(
+        used * Number(payment.bonusRate || 0),
+        Number(payment.bonusLimit || 0)
+      );
+      return sum + Math.max(Number(payment.bonusLimit || 0) - bonusEarned, 0);
+    }, 0);
+  }, [settings]);
+
+  const recommendedPayment = useMemo(() => {
+    const available = settings.payments.filter((payment) => {
+      const limit = payment.spendLimit || (payment.bonusRate > 0 ? payment.bonusLimit / payment.bonusRate : Number.MAX_SAFE_INTEGER);
+      return Math.max(limit - Number(payment.used || 0), 0) > 0;
+    });
+
+    return available.sort((a, b) => {
+      const rateA = Number(a.baseRate || 0) + Number(a.bonusRate || 0);
+      const rateB = Number(b.baseRate || 0) + Number(b.bonusRate || 0);
+      if (rateB !== rateA) return rateB - rateA;
+
+      const limitA = a.spendLimit || (a.bonusRate > 0 ? a.bonusLimit / a.bonusRate : 0);
+      const limitB = b.spendLimit || (b.bonusRate > 0 ? b.bonusLimit / b.bonusRate : 0);
+      return Math.max(limitB - Number(b.used || 0), 0) - Math.max(limitA - Number(a.used || 0), 0);
+    })[0] || null;
+  }, [settings]);
+
+  const applyStrategy = (steps) => {
+    const rate = settings.exchangeRate;
+
+    if (mode === 'cash') {
+      const newHistory = [{
+        time: Date.now(),
+        name: '現金',
+        amount: Number(amount || 0),
+        note,
+        category
+      }];
+      setHistory(prev => [...newHistory, ...prev]);
+      setAmount('');
+      setNote('');
+      return;
+    }
+
+    setSettings(prev=>({
+      ...prev,
+      payments: prev.payments.map(p=>{
+        const s = steps.find(x=>x.name===p.name);
+        if(!s) return p;
+        return { ...p, used: p.used + s.amount * rate };
+      })
+    }));
+
+    const newHistory = steps.map(s => ({
+      time: Date.now(),
+      name: s.name,
+      amount: s.amount,
+      note,
+      category
+    }));
+
+    setHistory(prev=>[...newHistory, ...prev]);
+    setAmount('');
+    setNote('');
+  };
+
+  const undo = (index) => {
+    const item = history[index];
+    if(!item) return;
+    const rate = settings.exchangeRate;
+
+    setSettings(prev=>({
+      ...prev,
+      payments: prev.payments.map(p=>{
+        if(p.name !== item.name) return p;
+        return { ...p, used: Math.max(p.used - item.amount * rate,0) };
+      })
+    }));
+
+    setHistory(prev=>prev.filter((_,i)=>i!==index));
+  };
+
+  const handleSave = (p) => {
+    setSettings(prev=>{
+      const list = [...prev.payments];
+      if (editingIndex !== null) list[editingIndex] = p;
+      else list.push(p);
+      return { ...prev, payments:list };
+    });
+    setShowModal(false);
+    setEditingIndex(null);
+  };
+
+  // ⭐ 匯率手動輸入 + 重算
+  const [rateInput, setRateInput] = useState(settings.exchangeRate);
+
+  // 匯率摺疊控制
+  const [showRate, setShowRate] = useState(false);
+
+  useEffect(()=>{
+    setRateInput(settings.exchangeRate);
+  },[country]);
+
+  const recalcUsedByHistory = (payments, historyList, rate) => {
+    return payments.map(p => {
+      const used = historyList
+        .filter(h => h.name === p.name)
+        .reduce((sum, h) => sum + Number(h.amount || 0) * rate, 0);
+      return { ...p, used };
+    });
+  };
+
+  const applyNewRate = () => {
+    const newRate = Number(rateInput);
+    if (!newRate || isNaN(newRate)) {
+      alert('請輸入正確匯率');
+      return;
+    }
+
+    setSettingsMap(prev => {
+      const currentSettings = prev[country];
+      const currentHistory = historyMap[country] || [];
+
+      return {
+        ...prev,
+        [country]: {
+          ...currentSettings,
+          exchangeRate: newRate,
+          payments: recalcUsedByHistory(
+            currentSettings.payments,
+            currentHistory,
+            newRate
+          )
+        }
+      };
+    });
+
+    alert('已套用新匯率並重新計算');
+  };
+
+  const applyRateForCountry = (targetCountry, newRate) => {
+    setSettingsMap(prev => {
+      const currentSettings = prev[targetCountry];
+      const currentHistory = historyMap[targetCountry] || [];
+
+      return {
+        ...prev,
+        [targetCountry]: {
+          ...currentSettings,
+          exchangeRate: newRate,
+          payments: recalcUsedByHistory(
+            currentSettings.payments,
+            currentHistory,
+            newRate
+          )
+        }
+      };
+    });
+  };
+
+  // ⭐ 自動結帳日 reset（專業版：只重置 used，不刪歷史）
+  useEffect(()=>{
+    const today = new Date();
+    const day = today.getDate();
+
+    setSettingsMap(prev=>{
+      const current = prev[country];
+      let changed = false;
+
+      const newPayments = current.payments.map(p=>{
+        if (!p.resetDay) return p;
+
+        const lastReset = lastResetMap[country]?.[p.name];
+        const alreadyResetThisMonth = lastReset && new Date(lastReset).getMonth() === today.getMonth();
+
+        if (day > p.resetDay && !alreadyResetThisMonth) {
+          changed = true;
+          // ⭐ 不刪歷史，只重置 used
+          return { ...p, used: 0 };
+        }
+
+        return p;
+      });
+
+      if (!changed) return prev;
+
+      const newLastReset = { ...lastResetMap };
+      newPayments.forEach(p=>{
+        if (p.resetDay && day > p.resetDay) {
+          newLastReset[country] = {
+            ...newLastReset[country],
+            [p.name]: Date.now()
+          };
+        }
+      });
+
+      setLastResetMap(newLastReset);
+
+      return {
+        ...prev,
+        [country]: {
+          ...current,
+          payments: newPayments
+        }
+      };
+    });
+  },[country, settingsMap]);
+
+  useEffect(()=>{
+    localStorage.setItem('darkMode', JSON.stringify(darkMode));
+  },[darkMode]);
+
+  const resetCurrentCountry = () => {
+    if (!window.confirm('重置刷卡紀錄?')) return;
+    setSettings(prev => ({ ...prev, payments: prev.payments.map(payment => ({ ...payment, used: 0 })) }));
+    setHistory([]);
+  };
+
+  return (
+    <AppShell darkMode={darkMode}>
+      <AppHeader
+        darkMode={darkMode}
+        setDarkMode={setDarkMode}
+        deferredPrompt={deferredPrompt}
+        installPWA={installPWA}
+        updateReady={updateReady}
+        applyUpdate={applyUpdate}
+        dismissUpdate={() => setUpdateReady(false)}
+      />
+
+      <CountrySelector country={country} setCountry={setCountry} darkMode={darkMode} />
+
+      {tab === 'home' && (
+        <>
+            country={country}
+            flag={flagMap[country]}
+            estimatedReward={estimatedRemainingReward}
+            darkMode={darkMode}
+          />
+            payment={recommendedPayment}
+            exchangeRate={settings.exchangeRate}
+            currencySymbol={currencySymbol}
+            darkMode={darkMode}
+          />
+          <HomePage
+            recommendedPayment={recommendedPayment}
+            settings={settings}
+            history={history}
+            currencySymbol={currencySymbol}
+            darkMode={darkMode}
+            setTab={setTab}
+            amount={amount}
+            setAmount={setAmount}
+            note={note}
+            setNote={setNote}
+            category={category}
+            setCategory={setCategory}
+            categories={categories}
+            setCategories={setCategories}
+            mode={mode}
+            setMode={setMode}
+            inputRef={inputRef}
+            data={data}
+            applyStrategy={applyStrategy}
+            setSettings={setSettings}
+            openPaymentEditor={(index) => { setEditingIndex(index); setShowModal(true); }}
+            resetCurrentCountry={resetCurrentCountry}
+          />
+        </>
+      )}
+
+      {tab === 'stats' && (
+        <StatisticsPage history={history} payments={settings.payments} currencySymbol={currencySymbol} darkMode={darkMode} />
+      )}
+
+      {tab === 'history' && (
+        <HistoryPage currencySymbol={currencySymbol} history={history} payments={settings.payments} onUndo={undo} darkMode={darkMode} />
+      )}
+
+      {tab === 'settings' && (
+        <SettingsPage
+          darkMode={darkMode}
+          setDarkMode={setDarkMode}
+          country={country}
+          setCountry={setCountry}
+          settingsMap={settingsMap}
+          handleExport={handleExport}
+          handleImport={handleImport}
+          handleClearAll={handleClearAll}
+          onApplyRate={applyRateForCountry}
+          onAddPayment={(targetCountry) => {
+            setCountry(targetCountry);
+            setEditingIndex(null);
+            setShowModal(true);
+          }}
+          onEditPayment={(targetCountry, index) => {
+            setCountry(targetCountry);
+            setEditingIndex(index);
+            setShowModal(true);
+          }}
+        />
+      )}
+
+      <BottomNavigation tab={tab} setTab={setTab} />
+
+      <PaymentModal
+        visible={showModal}
+        onClose={() => { setShowModal(false); setEditingIndex(null); }}
+        onSave={handleSave}
+        editing={editingIndex !== null ? settings.payments[editingIndex] : null}
+        darkMode={darkMode}
+      />
+    </AppShell>
+  );
+}

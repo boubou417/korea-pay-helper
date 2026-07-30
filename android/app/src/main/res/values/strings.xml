@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">PayHelper</string>
+    <string name="title_activity_main">PayHelper</string>
+    <string name="package_name">com.bou.payhelper</string>
+    <string name="custom_url_scheme">com.bou.payhelper</string>
+</resources>
