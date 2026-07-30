@@ -4,6 +4,14 @@ import SectionHeading from '../common/SectionHeading';
 
 const formatTWD = (value) => `NT$${Math.round(Number(value || 0)).toLocaleString()}`;
 
+const formatPurchaseTime = (value) => {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '時間未記錄';
+
+  const pad = (number) => String(number).padStart(2, '0');
+  return `${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+};
+
 export default function DashboardSummary({ payments = [], history = [], currencySymbol, darkMode, onOpenHistory }) {
   const earned = payments.reduce((sum, payment) => {
     const used = Number(payment.used || 0);
@@ -44,6 +52,7 @@ export default function DashboardSummary({ payments = [], history = [], currency
                 <div className="min-w-0">
                   <div className="truncate text-sm font-semibold">{item.note || item.name}</div>
                   <div className="truncate text-[11px] text-gray-400">{item.name} · {item.category || '未分類'}</div>
+                  <div className="mt-0.5 text-[10px] text-gray-400">🕒 {formatPurchaseTime(item.time)}</div>
                 </div>
                 <div className="shrink-0 text-sm font-bold text-green-500">
                   {currencySymbol}{Math.floor(Number(item.amount || 0)).toLocaleString()}
