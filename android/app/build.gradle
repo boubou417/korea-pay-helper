@@ -1,20 +1,44 @@
 apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+def autoCaptureGeneratedDir = file("$buildDir/generated/source/payhelperAutoCapture")
+
+tasks.register("generatePayHelperAutoCaptureService") {
+    def partsDir = file("src/main/autocapture_service_parts")
+    def outFile = file("$autoCaptureGeneratedDir/tw/apostar/notificationpaytest/PayAccessibilityService.kt")
+    inputs.dir(partsDir)
+    outputs.file(outFile)
+    doLast {
+        outFile.parentFile.mkdirs()
+        def parts = partsDir.listFiles()
+            ?.findAll { it.name.endsWith('.ktpart') }
+            ?.sort { a, b -> a.name <=> b.name } ?: []
+        if (parts.isEmpty()) {
+            throw new GradleException("Missing PayAccessibilityService source parts")
+        }
+        outFile.setText(parts.collect { it.getText('UTF-8') }.join(''), 'UTF-8')
+    }
+}
 
 android {
     namespace = "com.bou.payhelper"
     compileSdk = rootProject.ext.compileSdkVersion
+    sourceSets {
+        main.java.srcDir autoCaptureGeneratedDir
+    }
     defaultConfig {
         applicationId "com.bou.payhelper"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 6001
+        versionName "6.0.0-auto-capture-v1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
+    }
+    kotlinOptions {
+        jvmTarget = "21"
     }
     buildTypes {
         release {
@@ -22,6 +46,10 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
+}
+
+tasks.named("preBuild").configure {
+    dependsOn("generatePayHelperAutoCaptureService")
 }
 
 repositories {
