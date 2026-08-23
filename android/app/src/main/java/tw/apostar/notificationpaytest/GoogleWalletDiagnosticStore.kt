@@ -36,18 +36,7 @@ object GoogleWalletDiagnosticStore {
 
         list.add(0, x)
         while (list.size > MAX) list.removeAt(list.lastIndex)
-        val arr = JSONArray()
-        list.forEach { y ->
-            arr.put(JSONObject()
-                .put("time", y.time)
-                .put("packageName", y.packageName)
-                .put("eventType", y.eventType)
-                .put("eventClass", y.eventClass)
-                .put("eventText", y.eventText)
-                .put("visibleText", y.visibleText)
-                .put("tree", y.tree))
-        }
-        c.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).apply()
+        save(c, list)
     }
 
     fun load(c: Context): List<GoogleWalletDiagnosticCapture> = try {
@@ -68,5 +57,39 @@ object GoogleWalletDiagnosticStore {
         emptyList()
     }
 
-    fun clear(c: Context) = c.getSharedPreferences(PREF, 0).edit().clear().apply()
+    /**
+     * Formal Google Wallet sync calls clear() after its controller has entered the
+     * running state, so that starts a genuinely clean diagnostic session.
+     *
+     * Manual diagnostic also calls the same legacy clear() API. If it is started
+     * after a formal sync, keep the formal-sync captures instead of wiping the
+     * evidence we need for debugging the automatic flow.
+     */
+    fun clear(c: Context) {
+        if (GoogleWalletSyncController.isRunning()) {
+            c.getSharedPreferences(PREF, 0).edit().clear().apply()
+            return
+        }
+        val formal = load(c).filter { it.eventClass.startsWith("formal-sync/") || it.eventType == -100 }
+        if (formal.isEmpty()) {
+            c.getSharedPreferences(PREF, 0).edit().clear().apply()
+        } else {
+            save(c, formal)
+        }
+    }
+
+    private fun save(c: Context, list: List<GoogleWalletDiagnosticCapture>) {
+        val arr = JSONArray()
+        list.take(MAX).forEach { y ->
+            arr.put(JSONObject()
+                .put("time", y.time)
+                .put("packageName", y.packageName)
+                .put("eventType", y.eventType)
+                .put("eventClass", y.eventClass)
+                .put("eventText", y.eventText)
+                .put("visibleText", y.visibleText)
+                .put("tree", y.tree))
+        }
+        c.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).apply()
+    }
 }
