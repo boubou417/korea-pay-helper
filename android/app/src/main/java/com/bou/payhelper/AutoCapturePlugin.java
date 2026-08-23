@@ -16,7 +16,7 @@ import java.util.List;
 
 import tw.apostar.notificationpaytest.GoogleWalletDiagnosticCapture;
 import tw.apostar.notificationpaytest.GoogleWalletDiagnosticStore;
-import tw.apostar.notificationpaytest.GoogleWalletSyncController;
+import tw.apostar.notificationpaytest.GoogleWalletSyncControllerV2;
 import tw.apostar.notificationpaytest.GoogleWalletTransaction;
 import tw.apostar.notificationpaytest.GoogleWalletTransactionStore;
 import tw.apostar.notificationpaytest.JkosTransaction;
@@ -52,7 +52,7 @@ public class AutoCapturePlugin extends Plugin {
         out.put("linePayCount", LinePayTransactionStore.INSTANCE.load(getContext()).size());
         out.put("piWalletCount", PiWalletTransactionStore.INSTANCE.load(getContext()).size());
         out.put("googleWalletCount", GoogleWalletTransactionStore.INSTANCE.load(getContext()).size());
-        out.put("googleWalletRunning", GoogleWalletSyncController.isRunning());
+        out.put("googleWalletRunning", GoogleWalletSyncControllerV2.isRunning());
         out.put("googleDiagnosticCount", GoogleWalletDiagnosticStore.INSTANCE.load(getContext()).size());
         call.resolve(out);
     }
@@ -101,13 +101,13 @@ public class AutoCapturePlugin extends Plugin {
     @PluginMethod
     public void syncGoogleWallet(PluginCall call) {
         if (!requireService(call)) return;
-        getActivity().runOnUiThread(() -> GoogleWalletSyncController.start(service()));
+        getActivity().runOnUiThread(() -> GoogleWalletSyncControllerV2.start(service()));
         call.resolve();
     }
 
     @PluginMethod
     public void stopGoogleWalletSync(PluginCall call) {
-        GoogleWalletSyncController.stop(true);
+        GoogleWalletSyncControllerV2.stop(true);
         call.resolve();
     }
 
