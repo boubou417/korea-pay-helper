@@ -16,6 +16,9 @@ import java.util.List;
 
 import tw.apostar.notificationpaytest.GoogleWalletDiagnosticCapture;
 import tw.apostar.notificationpaytest.GoogleWalletDiagnosticStore;
+import tw.apostar.notificationpaytest.GoogleWalletSyncController;
+import tw.apostar.notificationpaytest.GoogleWalletTransaction;
+import tw.apostar.notificationpaytest.GoogleWalletTransactionStore;
 import tw.apostar.notificationpaytest.JkosTransaction;
 import tw.apostar.notificationpaytest.JkosTransactionStore;
 import tw.apostar.notificationpaytest.LinePayTransaction;
@@ -48,6 +51,8 @@ public class AutoCapturePlugin extends Plugin {
         out.put("jkoCount", JkosTransactionStore.INSTANCE.load(getContext()).size());
         out.put("linePayCount", LinePayTransactionStore.INSTANCE.load(getContext()).size());
         out.put("piWalletCount", PiWalletTransactionStore.INSTANCE.load(getContext()).size());
+        out.put("googleWalletCount", GoogleWalletTransactionStore.INSTANCE.load(getContext()).size());
+        out.put("googleWalletRunning", GoogleWalletSyncController.isRunning());
         out.put("googleDiagnosticCount", GoogleWalletDiagnosticStore.INSTANCE.load(getContext()).size());
         call.resolve(out);
     }
@@ -90,6 +95,19 @@ public class AutoCapturePlugin extends Plugin {
     public void syncPiWallet(PluginCall call) {
         if (!requireService(call)) return;
         getActivity().runOnUiThread(() -> service().startPiSync());
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void syncGoogleWallet(PluginCall call) {
+        if (!requireService(call)) return;
+        getActivity().runOnUiThread(() -> GoogleWalletSyncController.start(service()));
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void stopGoogleWalletSync(PluginCall call) {
+        GoogleWalletSyncController.stop(true);
         call.resolve();
     }
 
@@ -144,6 +162,18 @@ public class AutoCapturePlugin extends Plugin {
             o.put("status", x.getStatus());
             o.put("transactionId", x.getTransactionId());
             o.put("transactionType", x.getTransactionType());
+            o.put("detailChecked", x.getDetailChecked());
+            items.put(o);
+        }
+
+        for (GoogleWalletTransaction x : GoogleWalletTransactionStore.INSTANCE.load(getContext())) {
+            JSObject o = base("GOOGLE_WALLET", "Google Pay", x.getKey(), x.getShop(), cleanAmount(x.getAmount()), x.getDate());
+            o.put("paymentMethod", "Google Pay");
+            o.put("paymentAccount", x.getCardName().isEmpty() ? "" : (x.getCardName() + (x.getCardLast4().isEmpty() ? "" : " *" + x.getCardLast4())));
+            o.put("bank", x.getBank());
+            o.put("cardLast4", x.getCardLast4());
+            o.put("cardType", x.getCardType());
+            o.put("cardName", x.getCardName());
             o.put("detailChecked", x.getDetailChecked());
             items.put(o);
         }
