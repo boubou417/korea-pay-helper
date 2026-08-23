@@ -46,19 +46,17 @@ object GoogleWalletTransactionStore {
 
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
-        val current = load(c).toMutableList()
-        val index = current.mapIndexed { i, x -> x.key to i }.toMap().toMutableMap()
+        val map = LinkedHashMap<String, GoogleWalletTransaction>()
+        load(c).forEach { map[it.key] = it }
         var added = 0
 
         incoming.forEach { x ->
-            val oldIndex = index[x.key]
-            if (oldIndex == null) {
-                current.add(0, x)
-                index[x.key] = 0
+            val old = map[x.key]
+            if (old == null) {
+                map[x.key] = x
                 added += 1
             } else {
-                val old = current[oldIndex]
-                current[oldIndex] = old.copy(
+                map[x.key] = old.copy(
                     cardName = x.cardName.ifBlank { old.cardName },
                     bank = x.bank.ifBlank { old.bank },
                     cardLast4 = x.cardLast4.ifBlank { old.cardLast4 },
@@ -69,9 +67,8 @@ object GoogleWalletTransactionStore {
             }
         }
 
-        current.sortByDescending { it.date }
-        while (current.size > MAX) current.removeAt(current.lastIndex)
-        save(c, current)
+        val merged = map.values.sortedByDescending { it.date }.take(MAX)
+        save(c, merged)
         return added
     }
 
