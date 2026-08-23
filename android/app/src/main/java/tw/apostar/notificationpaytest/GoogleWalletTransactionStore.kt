@@ -15,7 +15,9 @@ data class GoogleWalletTransaction(
     val cardType: String = "",
     val detailChecked: Boolean = false
 ) {
-    val key: String get() = "$date|$shop|$amount|$cardLast4"
+    // Keep the identity stable when a list-only date such as 12:00:00 is later
+    // replaced by the exact time read from the transaction detail screen.
+    val key: String get() = "${date.substringBefore(' ')}|$shop|$amount|$cardLast4"
 }
 
 object GoogleWalletTransactionStore {
@@ -46,17 +48,24 @@ object GoogleWalletTransactionStore {
 
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
-        val map = LinkedHashMap<String, GoogleWalletTransaction>()
-        load(c).forEach { map[it.key] = it }
+        val byKey = LinkedHashMap<String, GoogleWalletTransaction>()
+        load(c).forEach { byKey[it.key] = it }
         var added = 0
 
         incoming.forEach { x ->
-            val old = map[x.key]
+            val old = byKey[x.key]
             if (old == null) {
-                map[x.key] = x
+                byKey[x.key] = x
                 added += 1
             } else {
-                map[x.key] = old.copy(
+                byKey[x.key] = old.copy(
+                    // Never overwrite an exact detail timestamp with the list's
+                    // placeholder noon value on a later quick sync.
+                    date = when {
+                        x.detailChecked -> x.date
+                        old.detailChecked -> old.date
+                        else -> old.date.ifBlank { x.date }
+                    },
                     cardName = x.cardName.ifBlank { old.cardName },
                     bank = x.bank.ifBlank { old.bank },
                     cardLast4 = x.cardLast4.ifBlank { old.cardLast4 },
@@ -67,10 +76,29 @@ object GoogleWalletTransactionStore {
             }
         }
 
-        val merged = map.values.sortedByDescending { it.date }.take(MAX)
-        save(c, merged)
+        val current = byKey.values.sortedByDescending { it.date }.take(MAX)
+        save(c, current)
         return added
     }
+
+    fun updateDetailTime(c: Context, key: String, exactDateTime: String): Boolean {
+        if (exactDateTime.isBlank()) return false
+        val current = load(c).toMutableList()
+        val index = current.indexOfFirst { it.key == key }
+        if (index < 0) return false
+        val old = current[index]
+        current[index] = old.copy(
+            date = exactDateTime,
+            detailChecked = true,
+            capturedAt = System.currentTimeMillis()
+        )
+        current.sortByDescending { it.date }
+        save(c, current)
+        return true
+    }
+
+    fun isDetailChecked(c: Context, key: String): Boolean =
+        load(c).firstOrNull { it.key == key }?.detailChecked == true
 
     private fun save(c: Context, list: List<GoogleWalletTransaction>) {
         val arr = JSONArray()
