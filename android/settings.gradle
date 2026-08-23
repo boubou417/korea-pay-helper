@@ -1,9 +1,24 @@
 include ':app'
 
+// Capacitor Android libraries are installed by npm and intentionally are not
+// committed to Git. A fresh Git checkout therefore must run the repository
+// root prepare-android.bat (npm ci + web build + cap sync) once before Android
+// Studio can resolve the Capacitor Gradle projects.
+def repoRoot = rootDir.parentFile
+def requiredCapacitorProjects = [
+    new File(repoRoot, 'node_modules/@capacitor/android/capacitor/build.gradle'),
+    new File(repoRoot, 'node_modules/@capacitor/filesystem/android/build.gradle'),
+    new File(repoRoot, 'node_modules/@capacitor/share/android/build.gradle')
+]
+def missingCapacitorProjects = requiredCapacitorProjects.findAll { !it.exists() }
+if (!missingCapacitorProjects.isEmpty()) {
+    throw new GradleException(
+        "Capacitor Android dependencies are missing. Close Android Studio, run prepare-android.bat from the korea-pay-helper repository root, then reopen/sync the android project. Missing: " +
+        missingCapacitorProjects.collect { it.absolutePath }.join(', ')
+    )
+}
+
 // Capacitor only generates this project when Cordova plugins are present.
-// The Pay Helper project currently does not require any Cordova plugin, so
-// allow Android Studio/Gradle to build directly from a Git checkout where the
-// generated capacitor-cordova-android-plugins directory is absent.
 def cordovaPluginsDir = new File(rootDir, 'capacitor-cordova-android-plugins')
 if (cordovaPluginsDir.exists()) {
     include ':capacitor-cordova-android-plugins'
