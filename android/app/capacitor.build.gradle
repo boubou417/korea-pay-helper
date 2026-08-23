@@ -7,13 +7,17 @@ android {
   }
 }
 
-apply from: "../capacitor-cordova-android-plugins/cordova.variables.gradle"
+// capacitor-cordova-android-plugins is generated only when Cordova plugins
+// are present. A clean Git checkout may not contain this directory.
+def cordovaVariables = file("../capacitor-cordova-android-plugins/cordova.variables.gradle")
+if (cordovaVariables.exists()) {
+    apply from: cordovaVariables
+}
+
 dependencies {
     implementation project(':capacitor-filesystem')
     implementation project(':capacitor-share')
-
 }
-
 
 if (hasProperty('postBuildExtras')) {
   postBuildExtras()
