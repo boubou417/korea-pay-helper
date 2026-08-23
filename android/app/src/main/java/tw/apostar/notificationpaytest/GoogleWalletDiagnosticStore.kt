@@ -17,13 +17,12 @@ data class GoogleWalletDiagnosticCapture(
 object GoogleWalletDiagnosticStore {
     private const val PREF = "google_wallet_diagnostic_captures"
     private const val KEY = "items"
-    private const val MAX = 100
+    private const val MAX = 160
 
+    @Synchronized
     fun add(c: Context, x: GoogleWalletDiagnosticCapture) {
         val list = load(c).toMutableList()
         val last = list.firstOrNull()
-        // Do not let a normal Accessibility event swallow a formal-sync marker just
-        // because both snapshots came from the same screen within 1.5 seconds.
         if (last != null &&
             last.packageName == x.packageName &&
             last.eventType == x.eventType &&
@@ -36,9 +35,10 @@ object GoogleWalletDiagnosticStore {
 
         list.add(0, x)
         while (list.size > MAX) list.removeAt(list.lastIndex)
-        save(c, list)
+        saveSync(c, list)
     }
 
+    @Synchronized
     fun load(c: Context): List<GoogleWalletDiagnosticCapture> = try {
         val arr = JSONArray(c.getSharedPreferences(PREF, 0).getString(KEY, "[]") ?: "[]")
         (0 until arr.length()).map { i ->
@@ -57,28 +57,30 @@ object GoogleWalletDiagnosticStore {
         emptyList()
     }
 
-    /**
-     * Formal Google Wallet sync calls clear() after its controller has entered the
-     * running state, so that starts a genuinely clean diagnostic session.
-     *
-     * Manual diagnostic also calls the same legacy clear() API. If it is started
-     * after a formal sync, keep the formal-sync captures instead of wiping the
-     * evidence we need for debugging the automatic flow.
-     */
+    @Synchronized
     fun clear(c: Context) {
-        if (GoogleWalletSyncController.isRunning()) {
-            c.getSharedPreferences(PREF, 0).edit().clear().apply()
+        // A formal V4 run must start from a completely clean diagnostic buffer.
+        // Manual diagnostic started later keeps formal captures so debugging evidence
+        // is never erased accidentally.
+        if (GoogleWalletSyncControllerV4.isRunning()) {
+            c.getSharedPreferences(PREF, 0).edit().clear().commit()
             return
         }
-        val formal = load(c).filter { it.eventClass.startsWith("formal-sync/") || it.eventType == -100 }
+
+        val formal = load(c).filter {
+            it.eventClass.startsWith("formal-sync-v4/") ||
+                it.eventClass.startsWith("formal-sync-v3/") ||
+                it.eventClass.startsWith("formal-sync/") ||
+                it.eventType < 0
+        }
         if (formal.isEmpty()) {
-            c.getSharedPreferences(PREF, 0).edit().clear().apply()
+            c.getSharedPreferences(PREF, 0).edit().clear().commit()
         } else {
-            save(c, formal)
+            saveSync(c, formal)
         }
     }
 
-    private fun save(c: Context, list: List<GoogleWalletDiagnosticCapture>) {
+    private fun saveSync(c: Context, list: List<GoogleWalletDiagnosticCapture>) {
         val arr = JSONArray()
         list.take(MAX).forEach { y ->
             arr.put(JSONObject()
@@ -90,6 +92,6 @@ object GoogleWalletDiagnosticStore {
                 .put("visibleText", y.visibleText)
                 .put("tree", y.tree))
         }
-        c.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).apply()
+        c.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).commit()
     }
 }
