@@ -1,5 +1,13 @@
 include ':app'
-include ':capacitor-cordova-android-plugins'
-project(':capacitor-cordova-android-plugins').projectDir = new File('./capacitor-cordova-android-plugins/')
+
+// Capacitor only generates this project when Cordova plugins are present.
+// The Pay Helper project currently does not require any Cordova plugin, so
+// allow Android Studio/Gradle to build directly from a Git checkout where the
+// generated capacitor-cordova-android-plugins directory is absent.
+def cordovaPluginsDir = new File(rootDir, 'capacitor-cordova-android-plugins')
+if (cordovaPluginsDir.exists()) {
+    include ':capacitor-cordova-android-plugins'
+    project(':capacitor-cordova-android-plugins').projectDir = cordovaPluginsDir
+}
 
 apply from: 'capacitor.settings.gradle'
