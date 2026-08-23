@@ -23,7 +23,13 @@ export default function AutoCapturePanel({ darkMode }) {
     }
   };
 
-  useEffect(() => { refresh(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!native) return;
+
+    AutoCapture.getStatus()
+      .then(setStatus)
+      .catch((error) => console.warn(error));
+  }, [native]);
 
   const run = async (label, fn) => {
     setBusy(true);
