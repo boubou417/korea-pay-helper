@@ -67,7 +67,7 @@ export default function AutoCapturePanel({ darkMode }) {
       const result = await AutoCapture.getGoogleWalletDiagnostics();
       const captures = result.captures || [];
       if (!captures.length) {
-        setMessage('目前沒有 Google Wallet 診斷畫面。請先啟動診斷並進入「查看更多交易」及單筆交易明細。');
+        setMessage('目前沒有 Google Wallet 診斷畫面。只有正式同步異常時才需要重新跑診斷。');
         return;
       }
       await exportGoogleWalletDiagnostics(captures);
@@ -97,7 +97,7 @@ export default function AutoCapturePanel({ darkMode }) {
       <div className="flex items-center justify-between gap-2 mb-2">
         <div>
           <div className="font-bold">自動消費同步（Android）</div>
-          <div className="text-[11px] opacity-60">街口 · LINE Pay · Pi 拍錢包 · Google Wallet</div>
+          <div className="text-[11px] opacity-60">街口 · LINE Pay · Pi 拍錢包 · Google Pay</div>
         </div>
         <span className={`px-2 py-1 rounded-full text-[10px] ${status?.accessibilityEnabled ? 'bg-green-500 text-white' : 'bg-amber-500 text-white'}`}>
           {status?.accessibilityEnabled ? '無障礙已開啟' : '需開啟無障礙'}
@@ -108,7 +108,7 @@ export default function AutoCapturePanel({ darkMode }) {
         <div>街口：{status?.jkoCount ?? 0}</div>
         <div>LINE Pay：{status?.linePayCount ?? 0}</div>
         <div>Pi：{status?.piWalletCount ?? 0}</div>
-        <div>Google 診斷：{status?.googleDiagnosticCount ?? 0}</div>
+        <div>Google Pay：{status?.googleWalletCount ?? 0}</div>
       </div>
 
       {!status?.accessibilityEnabled && (
@@ -121,14 +121,15 @@ export default function AutoCapturePanel({ darkMode }) {
         <button disabled={busy} onClick={() => run('街口快速同步', () => AutoCapture.syncJko())} className={`${buttonClass} bg-blue-600 text-white`}>同步街口最新交易</button>
         <button disabled={busy} onClick={() => run('LINE Pay 快速同步', () => AutoCapture.syncLinePay())} className={`${buttonClass} bg-green-600 text-white`}>同步 LINE Pay 最新交易</button>
         <button disabled={busy} onClick={() => run('Pi 拍錢包快速同步', () => AutoCapture.syncPiWallet())} className={`${buttonClass} bg-purple-600 text-white`}>同步 Pi 拍錢包最新交易</button>
-        <button disabled={busy} onClick={() => run('Google Wallet 交易紀錄診斷', () => AutoCapture.diagnoseGoogleWallet())} className={`${buttonClass} bg-gray-700 text-white`}>Google Wallet：掃交易記錄（診斷）</button>
+        <button disabled={busy} onClick={() => run('Google Wallet 快速同步', () => AutoCapture.syncGoogleWallet())} className={`${buttonClass} bg-rose-600 text-white`}>同步 Google Pay 最新交易</button>
         <button disabled={busy} onClick={importTransactions} className={`${buttonClass} bg-cyan-600 text-white`}>匯入自動消費到台灣紀錄</button>
+        <button disabled={busy} onClick={() => run('Google Wallet 診斷', () => AutoCapture.diagnoseGoogleWallet())} className={`${buttonClass} ${darkMode ? 'bg-gray-700 text-gray-100' : 'bg-gray-200 text-gray-800'}`}>Google Wallet 診斷（除錯用）</button>
         <button disabled={busy} onClick={exportGoogle} className={`${buttonClass} ${darkMode ? 'bg-gray-700 text-gray-100' : 'bg-gray-200 text-gray-800'}`}>匯出 Google Wallet 診斷 JSON</button>
       </div>
 
       {message && <div className={`mt-3 text-xs leading-relaxed ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>{message}</div>}
       <div className="mt-3 text-[10px] opacity-50 leading-relaxed">
-        Google Wallet 不依賴付款通知；這一版直接從 Wallet 的「查看更多交易」與單筆明細取得真實 Accessibility 結構。第一次請跑診斷並匯出 JSON，之後即可升級成正式快速同步。
+        Google Pay 正式同步直接讀 Google Wallet 的卡片交易記錄，不依賴付款通知。程式會依序開啟 Wallet 中的付款卡、進入「查看更多交易」、掃描並捲動交易列表，再回到下一張卡；同一筆交易會自動去重。
       </div>
     </div>
   );
