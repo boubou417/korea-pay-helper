@@ -18,6 +18,12 @@ object GoogleWalletSyncController {
     private const val SELF = "com.bou.payhelper"
     private const val MAX_PAGES_PER_CARD = 20
     private const val DETAIL_MAX_AGE_DAYS = 45
+    private const val MAX_CARD_OPEN_ATTEMPTS = 4
+
+    private const val STAGE_HOME = 0
+    private const val STAGE_CARD_OPENING = 1
+    private const val STAGE_HISTORY = 2
+    private const val STAGE_DETAIL = 3
 
     private data class CardInfo(
         val name: String,
@@ -30,21 +36,27 @@ object GoogleWalletSyncController {
     private var service: PayAccessibilityService? = null
     private var running = false
     private var startedAt = 0L
-    private var stage = 0 // 0=wallet home, 1=card activity, 2=full history, 3=transaction detail
+    private var stage = STAGE_HOME
+
     private var cardIndex = 0
     private var currentCardName = ""
     private var currentCardLast4 = ""
     private var currentCardType = ""
+    private var cardOpenAttempts = 0
+    private var cardOpenStartedAt = 0L
+
     private var page = 0
     private var lastFingerprint = ""
     private var noMoveCount = 0
     private var consecutiveKnownPages = 0
+
     private val knownAtStart = HashSet<String>()
     private val seenThisRun = HashSet<String>()
     private val detailVisitedThisRun = HashSet<String>()
     private var pendingDetail: GoogleWalletTransaction? = null
     private var detailAttempts = 0
     private var detailOpenedAt = 0L
+
     private var newThisRun = 0
     private var detailsThisRun = 0
 
@@ -54,18 +66,18 @@ object GoogleWalletSyncController {
     @JvmStatic
     fun start(s: PayAccessibilityService) {
         if (running) return
+
         service = s
         running = true
         startedAt = System.currentTimeMillis()
-        stage = 0
+        stage = STAGE_HOME
         cardIndex = 0
         currentCardName = ""
         currentCardLast4 = ""
         currentCardType = ""
-        page = 0
-        lastFingerprint = ""
-        noMoveCount = 0
-        consecutiveKnownPages = 0
+        cardOpenAttempts = 0
+        cardOpenStartedAt = 0L
+        resetCardPageState()
         newThisRun = 0
         detailsThisRun = 0
         pendingDetail = null
@@ -76,8 +88,6 @@ object GoogleWalletSyncController {
         knownAtStart.clear()
         knownAtStart.addAll(GoogleWalletTransactionStore.load(s).map { it.key })
 
-        // Formal sync now owns the diagnostic session. This means an exported Google
-        // Wallet diagnostic JSON contains the actual auto-sync list/detail screens.
         s.stopGoogleWalletDiagnostic(false)
         GoogleWalletDiagnosticStore.clear(s)
         log(s, "=== Google Wallet 快速同步開始；existing=${knownAtStart.size} ===")
@@ -85,7 +95,7 @@ object GoogleWalletSyncController {
         val launch = s.packageManager.getLaunchIntentForPackage(GOOGLE_WALLET)
         if (launch == null) {
             log(s, "⚠ 找不到 Google Wallet App")
-            finish(returnToApp = true)
+            finish(true)
             return
         }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
@@ -108,6 +118,7 @@ object GoogleWalletSyncController {
     private fun tick() {
         val s = service ?: return
         if (!running) return
+
         if (System.currentTimeMillis() - startedAt > 300_000L) {
             log(s, "⚠ Google Wallet 同步超過 5 分鐘，自動結束")
             finish(true)
@@ -121,10 +132,10 @@ object GoogleWalletSyncController {
         }
 
         when (stage) {
-            0 -> processWalletHome(s, root)
-            1 -> processCardActivity(s, root)
-            2 -> processHistory(s, root)
-            3 -> processTransactionDetail(s, root)
+            STAGE_HOME -> processWalletHome(s, root)
+            STAGE_CARD_OPENING -> processCardOpening(s, root)
+            STAGE_HISTORY -> processHistory(s, root)
+            STAGE_DETAIL -> processTransactionDetail(s, root)
             else -> finish(true)
         }
     }
@@ -132,9 +143,11 @@ object GoogleWalletSyncController {
     private fun processWalletHome(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
         val cards = findCards(root)
         if (cards.isEmpty()) {
-            schedule(550)
+            captureFormal(s, root, "wallet-home-no-cards")
+            schedule(600)
             return
         }
+
         if (cardIndex >= cards.size) {
             log(s, "✓ Google Wallet 全部卡片同步完成；new=$newThisRun detail=$detailsThisRun total=${GoogleWalletTransactionStore.load(s).size}")
             finish(true)
@@ -145,49 +158,114 @@ object GoogleWalletSyncController {
         currentCardName = card.name
         currentCardLast4 = card.last4
         currentCardType = card.type
-        page = 0
-        lastFingerprint = ""
-        noMoveCount = 0
-        consecutiveKnownPages = 0
+        cardOpenAttempts = 0
+        cardOpenStartedAt = System.currentTimeMillis()
+        resetCardPageState()
         pendingDetail = null
         detailAttempts = 0
         detailOpenedAt = 0L
 
-        log(s, "Google Wallet card ${cardIndex + 1}/${cards.size}: ${card.name} *${card.last4}")
         captureFormal(s, root, "wallet-home-card-${card.last4}")
-        if (clickRobust(s, card.node, "card-${card.last4}")) {
-            stage = 1
-            schedule(900)
-        } else {
-            log(s, "⚠ Google Wallet 卡片無法點擊，跳過 ${card.name} *${card.last4}")
-            cardIndex += 1
-            schedule(500)
-        }
+        log(s, "Google Wallet card ${cardIndex + 1}/${cards.size}: ${card.name} *${card.last4}")
+
+        val accepted = clickAction(s, card.node, "card-${card.last4}-initial")
+        log(s, "Google Wallet card *${card.last4} initial ACTION_CLICK accepted=$accepted")
+        stage = STAGE_CARD_OPENING
+        schedule(850)
     }
 
-    private fun processCardActivity(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
-        mergeRows(s, parseRows(root))
-
+    private fun processCardOpening(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
+        val values = descendantTexts(root)
         val more = findExactText(root, "查看更多交易")
+
+        // Reached the selected card activity. It exposes recent transactions plus
+        // the "查看更多交易" button.
         if (more != null) {
+            mergeRows(s, parseRows(root))
             captureFormal(s, root, "card-${currentCardLast4}-before-more")
-            if (clickRobust(s, more, "more-${currentCardLast4}")) {
-                stage = 2
-                page = 0
-                lastFingerprint = ""
-                noMoveCount = 0
-                consecutiveKnownPages = 0
-                log(s, "Google Wallet ${currentCardLast4}: 進入查看更多交易")
+            val accepted = clickRobust(s, more, "more-${currentCardLast4}")
+            log(s, "Google Wallet *$currentCardLast4 查看更多交易 click accepted=$accepted")
+            if (accepted) {
+                stage = STAGE_HISTORY
+                resetCardPageState()
                 schedule(900)
                 return
             }
+            schedule(500)
+            return
         }
-        schedule(550)
+
+        val stillHome = isWalletHome(root, values)
+        if (stillHome) {
+            val elapsed = System.currentTimeMillis() - cardOpenStartedAt
+            if (elapsed < 700L) {
+                schedule(350)
+                return
+            }
+
+            cardOpenAttempts += 1
+            captureFormal(s, root, "card-${currentCardLast4}-still-home-attempt$cardOpenAttempts")
+
+            if (cardOpenAttempts > MAX_CARD_OPEN_ATTEMPTS) {
+                log(s, "⚠ Google Wallet *$currentCardLast4 多次點卡仍停在首頁，跳過此卡")
+                skipCurrentCardFromHome()
+                return
+            }
+
+            val card = findCards(root).firstOrNull { it.last4 == currentCardLast4 }
+            if (card == null) {
+                log(s, "⚠ Google Wallet 首頁找不到目前卡 *$currentCardLast4，稍後重試")
+                schedule(500)
+                return
+            }
+
+            // Some Wallet/Compose versions report ACTION_CLICK=true for the selected
+            // card while doing nothing. Alternate ACTION_CLICK and a direct gesture.
+            val accepted = if (cardOpenAttempts == 1) {
+                clickAction(s, card.node, "card-${currentCardLast4}-retry-action")
+            } else {
+                clickGesture(s, card.node, "card-${currentCardLast4}-retry-gesture$cardOpenAttempts")
+            }
+            log(s, "Google Wallet *$currentCardLast4 retry=$cardOpenAttempts accepted=$accepted")
+            cardOpenStartedAt = System.currentTimeMillis()
+            schedule(900)
+            return
+        }
+
+        // We left the home page but the card content may still be binding.
+        if (cardOpenAttempts == 0) {
+            captureFormal(s, root, "card-${currentCardLast4}-opening-transient")
+        }
+        if (System.currentTimeMillis() - cardOpenStartedAt > 7000L) {
+            cardOpenAttempts += 1
+            captureFormal(s, root, "card-${currentCardLast4}-opening-timeout$cardOpenAttempts")
+            if (cardOpenAttempts > MAX_CARD_OPEN_ATTEMPTS) {
+                log(s, "⚠ Google Wallet *$currentCardLast4 卡片頁載入逾時，返回首頁並跳過")
+                s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                h.postDelayed({ skipCurrentCardFromHome() }, 700)
+                return
+            }
+            cardOpenStartedAt = System.currentTimeMillis()
+        }
+        schedule(500)
     }
 
     private fun processHistory(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
+        val values = descendantTexts(root)
+
+        // "查看更多交易" click may also be accepted without navigation. If that
+        // happens, move back to card-opening logic and retry the button.
+        if (values.any { it == "查看更多交易" } && values.none { it == "交易記錄" }) {
+            captureFormal(s, root, "history-${currentCardLast4}-still-card-page")
+            stage = STAGE_CARD_OPENING
+            cardOpenStartedAt = System.currentTimeMillis()
+            schedule(450)
+            return
+        }
+
         val rows = parseRows(root)
         if (rows.isEmpty()) {
+            captureFormal(s, root, "history-${currentCardLast4}-rows-empty")
             schedule(550)
             return
         }
@@ -211,10 +289,10 @@ object GoogleWalletSyncController {
                 pendingDetail = detailCandidate
                 detailAttempts = 0
                 detailOpenedAt = System.currentTimeMillis()
-                stage = 3
+                stage = STAGE_DETAIL
                 lastFingerprint = ""
                 noMoveCount = 0
-                log(s, "Google Wallet *$currentCardLast4: 開啟明細 ${detailCandidate.shop} ${detailCandidate.date.substringBefore(' ')} $${detailCandidate.amount}")
+                log(s, "Google Wallet *$currentCardLast4 開啟明細：${detailCandidate.shop} ${detailCandidate.date.substringBefore(' ')} amount=${detailCandidate.amount}")
                 schedule(700)
                 return
             }
@@ -227,7 +305,7 @@ object GoogleWalletSyncController {
         if (fingerprint == lastFingerprint) noMoveCount += 1 else noMoveCount = 0
         lastFingerprint = fingerprint
 
-        log(s, "Google Wallet ${currentCardLast4}: page=$page rows=${rows.size} new=$newUnique knownPages=$consecutiveKnownPages noMove=$noMoveCount")
+        log(s, "Google Wallet *$currentCardLast4 page=$page rows=${rows.size} new=$newUnique knownPages=$consecutiveKnownPages noMove=$noMoveCount")
 
         if (consecutiveKnownPages >= 2 || noMoveCount >= 2 || page >= MAX_PAGES_PER_CARD) {
             finishCurrentCard(s)
@@ -247,7 +325,7 @@ object GoogleWalletSyncController {
     private fun processTransactionDetail(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
         val tx = pendingDetail
         if (tx == null) {
-            stage = 2
+            stage = STAGE_HISTORY
             schedule(400)
             return
         }
@@ -270,7 +348,7 @@ object GoogleWalletSyncController {
             detailAttempts = 0
             detailOpenedAt = 0L
             s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            stage = 2
+            stage = STAGE_HISTORY
             schedule(800)
             return
         }
@@ -278,12 +356,10 @@ object GoogleWalletSyncController {
         val stillHistory = values.any { it == "交易記錄" } && values.any { it == tx.shop }
         detailAttempts += 1
 
-        // ACTION_CLICK can be accepted by Compose while the screen does not navigate.
-        // If the list is still visible after ~1.5s, retry once with a direct gesture.
         if (stillHistory && detailAttempts == 5 && System.currentTimeMillis() - detailOpenedAt > 1200L) {
             val rowNode = findRowNode(root, tx)
             if (rowNode != null) {
-                log(s, "Google Wallet 明細仍停在列表，使用 gesture fallback 重點一次：${tx.shop}")
+                log(s, "Google Wallet 明細仍停在列表，使用 gesture fallback：${tx.shop}")
                 clickGesture(s, rowNode, "detail-retry-${safeLabel(tx.shop)}")
             }
         }
@@ -299,8 +375,13 @@ object GoogleWalletSyncController {
         pendingDetail = null
         detailAttempts = 0
         detailOpenedAt = 0L
-        s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-        stage = 2
+
+        // Only BACK when we actually left the history list. If the click never
+        // navigated, BACK here would incorrectly exit the history page.
+        if (!stillHistory) {
+            s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
+        stage = STAGE_HISTORY
         schedule(800)
     }
 
@@ -310,13 +391,40 @@ object GoogleWalletSyncController {
         h.postDelayed({
             if (!running) return@postDelayed
             s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            cardIndex += 1
-            stage = 0
-            currentCardName = ""
-            currentCardLast4 = ""
-            currentCardType = ""
-            schedule(1000)
-        }, 700)
+            h.postDelayed({
+                if (!running) return@postDelayed
+                cardIndex += 1
+                stage = STAGE_HOME
+                currentCardName = ""
+                currentCardLast4 = ""
+                currentCardType = ""
+                schedule(900)
+            }, 650)
+        }, 650)
+    }
+
+    private fun skipCurrentCardFromHome() {
+        cardIndex += 1
+        stage = STAGE_HOME
+        currentCardName = ""
+        currentCardLast4 = ""
+        currentCardType = ""
+        cardOpenAttempts = 0
+        cardOpenStartedAt = 0L
+        resetCardPageState()
+        schedule(600)
+    }
+
+    private fun resetCardPageState() {
+        page = 0
+        lastFingerprint = ""
+        noMoveCount = 0
+        consecutiveKnownPages = 0
+    }
+
+    private fun isWalletHome(root: AccessibilityNodeInfo, values: List<String> = descendantTexts(root)): Boolean {
+        if (values.any { it == "查看更多交易" } || values.any { it == "交易記錄" }) return false
+        return values.any { it == "付款卡" } && findCards(root).isNotEmpty()
     }
 
     private fun mergeRows(s: PayAccessibilityService, rows: List<GoogleWalletTransaction>) {
@@ -403,13 +511,15 @@ object GoogleWalletSyncController {
         } catch (_: Exception) {
             emptyList()
         }
+
         return nodes.mapNotNull { node ->
             val texts = descendantTexts(node)
             val desc = texts.firstOrNull { it.startsWith("末位數號碼為") } ?: return@mapNotNull null
-            val digits = Regex("末位數號碼為\\s*([0-9 ]+)").find(desc)?.groupValues?.getOrNull(1)
-                ?.filter { it.isDigit() }.orEmpty()
+            val digits = Regex("末位數號碼為\\s*([0-9 ]+)")
+                .find(desc)?.groupValues?.getOrNull(1)?.filter { it.isDigit() }.orEmpty()
             val last4 = digits.takeLast(4)
             if (last4.length != 4) return@mapNotNull null
+
             var name = desc.substringAfter("的 ", desc)
                 .removeSuffix("卡片。")
                 .removeSuffix("卡片")
@@ -430,7 +540,9 @@ object GoogleWalletSyncController {
         fun walk(n: AccessibilityNodeInfo?, depth: Int) {
             if (n == null || depth > 24 || out.size > 180) return
             n.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out.add(it) }
-            n.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "Image" }?.let { out.add(it) }
+            n.contentDescription?.toString()?.trim()
+                ?.takeIf { it.isNotEmpty() && it != "Image" }
+                ?.let { out.add(it) }
             for (i in 0 until n.childCount) walk(n.getChild(i), depth + 1)
         }
         walk(root, 0)
@@ -448,12 +560,10 @@ object GoogleWalletSyncController {
         return null
     }
 
-    private fun clickRobust(s: PayAccessibilityService, node: AccessibilityNodeInfo, label: String): Boolean {
+    private fun clickAction(s: PayAccessibilityService, node: AccessibilityNodeInfo, label: String): Boolean {
         var p: AccessibilityNodeInfo? = node
-        var fallback: AccessibilityNodeInfo? = node
         repeat(7) { level ->
             val current = p ?: return@repeat
-            fallback = current
             if (current.isClickable) {
                 val ok = current.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 log(s, "Google Wallet click[$label] ACTION_CLICK level=$level accepted=$ok")
@@ -461,7 +571,12 @@ object GoogleWalletSyncController {
             }
             p = current.parent
         }
-        return fallback?.let { clickGesture(s, it, label) } ?: false
+        return false
+    }
+
+    private fun clickRobust(s: PayAccessibilityService, node: AccessibilityNodeInfo, label: String): Boolean {
+        if (clickAction(s, node, label)) return true
+        return clickGesture(s, node, "$label-fallback")
     }
 
     private fun clickGesture(s: PayAccessibilityService, node: AccessibilityNodeInfo, label: String): Boolean {
@@ -471,6 +586,7 @@ object GoogleWalletSyncController {
             log(s, "⚠ Google Wallet gesture[$label] bounds empty")
             return false
         }
+
         val p = Path()
         p.moveTo(r.exactCenterX(), r.exactCenterY())
         val g = GestureDescription.Builder()
@@ -480,6 +596,7 @@ object GoogleWalletSyncController {
             override fun onCompleted(gestureDescription: GestureDescription?) {
                 log(s, "✓ Google Wallet gesture[$label] completed ${r.centerX()},${r.centerY()}")
             }
+
             override fun onCancelled(gestureDescription: GestureDescription?) {
                 log(s, "⚠ Google Wallet gesture[$label] cancelled ${r.centerX()},${r.centerY()}")
             }
@@ -517,11 +634,13 @@ object GoogleWalletSyncController {
             val minute = match.groupValues[3].toIntOrNull() ?: continue
             val second = match.groupValues[4].toIntOrNull() ?: 0
             if (hour !in 0..23 || minute !in 0..59 || second !in 0..59) continue
+
             if (period == "下午" || period == "PM") {
                 if (hour in 1..11) hour += 12
             } else if (period == "上午" || period == "AM") {
                 if (hour == 12) hour = 0
             }
+
             val day = originalDate.substringBefore(' ')
             if (!Regex("^\\d{4}/\\d{2}/\\d{2}$").matches(day)) continue
             return String.format(Locale.US, "%s %02d:%02d:%02d", day, hour, minute, second)
@@ -578,8 +697,11 @@ object GoogleWalletSyncController {
         return sb.toString()
     }
 
-    private fun safeLabel(value: String): String = value.replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]"), "_").take(24)
-    private fun cleanNumeric(value: String): String = value.replace(Regex("[^0-9.]"), "").trimStart('0')
+    private fun safeLabel(value: String): String =
+        value.replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]"), "_").take(24)
+
+    private fun cleanNumeric(value: String): String =
+        value.replace(Regex("[^0-9.]"), "").trimStart('0')
 
     private fun inferBank(cardName: String): String = when {
         cardName.contains("彰化銀行") || cardName.contains("彰銀") -> "彰銀"
