@@ -174,6 +174,11 @@ public class AutoCapturePlugin extends Plugin {
             o.put("cardLast4", x.getCardLast4());
             o.put("cardType", x.getCardType());
             o.put("cardName", x.getCardName());
+            o.put("transactionId", x.getTransactionId());
+            o.put("transactionType", x.getTransactionType());
+            o.put("virtualCardLast4", x.getVirtualCardLast4());
+            o.put("virtualCardType", x.getVirtualCardType());
+            o.put("cardMatchSource", x.getCardMatchSource());
             o.put("detailChecked", x.getDetailChecked());
             items.put(o);
         }
