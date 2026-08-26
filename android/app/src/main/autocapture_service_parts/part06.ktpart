@@ -1,0 +1,210 @@
+        lastPiCaptureAt=0L; lastPiSignature=""
+        PiWalletDiagnosticStore.clear(this)
+        log("=== V2.41 Pi 拍錢包診斷開始：請進入交易紀錄，並點開一筆交易明細 ===")
+        val launch=packageManager.getLaunchIntentForPackage(PI_WALLET)
+        if(launch==null){
+            piDiagnosticRunning=false
+            log("⚠ 找不到 Pi 拍錢包 App；package=$PI_WALLET")
+            return
+        }
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        startActivity(launch)
+        h.postDelayed({ capturePiDiagnostic(null) },1200)
+    }
+
+    fun stopPiDiagnostic(){
+        if(!piDiagnosticRunning){ log("Pi 拍錢包診斷目前未啟動"); return }
+        capturePiDiagnostic(null)
+        piDiagnosticRunning=false
+        log("=== V2.41 Pi 拍錢包診斷停止；已保存 ${PiWalletDiagnosticStore.load(this).size} 個畫面 ===")
+    }
+
+    private fun capturePiDiagnostic(e:AccessibilityEvent?){
+        if(!piDiagnosticRunning) return
+        val root=rootInActiveWindow ?: return
+        val pkg=root.packageName?.toString().orEmpty()
+        if(pkg!=PI_WALLET) return
+        val visible=visibleTexts(root).joinToString("\n").take(16000)
+        val tree=dumpTree(root,650).take(40000)
+        val sig="$pkg|$visible|$tree"
+        val now=System.currentTimeMillis()
+        if(sig==lastPiSignature && now-lastPiCaptureAt<1500L) return
+        lastPiSignature=sig; lastPiCaptureAt=now
+        PiWalletDiagnosticStore.add(this, PiWalletDiagnosticCapture(
+            time=now, packageName=pkg,
+            eventType=e?.eventType ?: 0,
+            eventClass=e?.className?.toString().orEmpty(),
+            eventText=e?.text?.joinToString(" | ").orEmpty(),
+            visibleText=visible, tree=tree
+        ))
+        val title=visible.lineSequence().firstOrNull{it.isNotBlank()}.orEmpty().take(60)
+        log("Pi 拍錢包診斷已保存畫面 #${PiWalletDiagnosticStore.load(this).size} package=$pkg title=[$title]")
+    }
+
+    fun startJkoSync(){
+        if(running || linePayFormalMode || piFormalMode){ log("⚠ 其他支付同步進行中，請完成後再同步街口"); return }
+        running=true; stage=0; myAttempts=0; txAttempts=0; page=0; sample=0; stableSamples=0; noNewPages=0; lastCompletedPageSignature=""; transactionClickPending=false; transactionClickAt=0L
+        collected.clear(); lastSignature=""
+        detailStarted=false; detailIndex=0; currentDetailKey=""; detailKeys.clear(); detailWaitAttempts=0; detailParseAttempts=0; detailClickAt=0L; detailFailedKeys.clear()
+        revisitPass=0; rewindStable=0; rewindLastSignature=""
+        knownAtStart.clear()
+        val existing=JkosTransactionStore.load(this)
+        existing.forEach{ knownAtStart.add(it.key) }
+        repairMode=existing.any{!it.detailChecked}
+        newTransactionsThisRun=0; completedDetailsThisRun=0; consecutiveKnownPages=0
+        initialRewindPending=false; initialRewindDone=false
+        // Formal mode keeps diagnostic trees only for failures; clear old heavy debug captures.
+        JkosTransactionTreeStore.clear(this)
+        JkosTransactionDetailStore.clear(this)
+        log("=== V2.41 開始：增量同步；既有=${existing.size} 筆，待補明細=${existing.count{!it.detailChecked}} ===")
+        val i=packageManager.getLaunchIntentForPackage(JKO)
+        if(i==null){ log("找不到街口"); finish(); return }
+        i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        startActivity(i)
+        h.postDelayed({step()},1400)
+        h.postDelayed({ if(running){log("⚠ V2.41 總流程逾時"); output();finish()} },360000)
+    }
+
+    private fun step(){
+        if(!running)return
+        val r=rootInActiveWindow ?: run { h.postDelayed({step()},500); return }
+        if(r.packageName?.toString()!=JKO){h.postDelayed({step()},500);return}
+        val text=texts(r)
+        when(stage){
+            0 -> openMy(r,text)
+            1 -> openTransactions(r,text)
+            2 -> scanTransactions(r,text)
+            3 -> captureDetailPage(r,text)
+            4 -> waitReturnFromDetail(r,text)
+            5 -> rewindToTop(r,text)
+        }
+    }
+
+    private fun openMy(root:AccessibilityNodeInfo,text:String){
+        if(isMy(text)){ log("✓ V2.41 已在「我的」頁"); stage=1; h.postDelayed({step()},900); return }
+        val n=findExact(root,"我的")
+        if(n!=null){
+            val rc=Rect();n.getBoundsInScreen(rc)
+            log("找到「我的」 bounds=$rc")
+            if(clickSelfOrParent(n)){myAttempts++;h.postDelayed({step()},900);return}
+            tap(rc.exactCenterX(),rc.exactCenterY());myAttempts++;return
+        }
+        val dm=resources.displayMetrics
+        val ys=floatArrayOf(.925f,.945f,.962f)
+        val y=dm.heightPixels*ys[myAttempts.coerceAtMost(ys.lastIndex)]
+        log("找不到「我的」node；底部導航 fallback #${myAttempts+1}")
+        tap(dm.widthPixels*.875f,y);myAttempts++
+    }
+
+    private fun openTransactions(root:AccessibilityNodeInfo,text:String){
+        if(isTransactionListPage(root,text)){
+            transactionClickPending=false
+            if(!initialRewindDone){
+                log("↟ V2.41 已進入交易紀錄；先回到清單最上方，確保從最新交易開始增量同步")
+                initialRewindPending=true
+                stage=5; rewindStable=0; rewindLastSignature=""
+                h.postDelayed({step()},500); return
+            }
+            log("✓ V2.41 已定位最新交易；開始增量解析")
+            stage=2; sample=0; stableSamples=0; lastSignature=""; h.postDelayed({step()},900); return
+        }
+
+        // A click has already been sent. Do not let the accessibility event storm
+        // click the same place repeatedly while JKOS is changing pages.
+        if(transactionClickPending){
+            val elapsed=System.currentTimeMillis()-transactionClickAt
+            if(elapsed<2200L){
+                log("… 等待交易紀錄頁載入 (${elapsed}ms)")
+                h.postDelayed({step()},500); return
+            }
+            transactionClickPending=false
+            log("⚠ 點擊後仍未判定為交易紀錄頁，重新分析目前 Accessibility Tree")
+        }
+
+        val n=findExact(root,"交易紀錄")
+        if(n!=null){
+            val textRect=Rect(); n.getBoundsInScreen(textRect)
+            log("找到「交易紀錄」文字 node bounds=$textRect clickable=${n.isClickable}")
+
+            // V2.19: never use a hard-coded screen coordinate. Walk upward from
+            // the label and use the first real clickable container exposed by JKOS.
+            var p:AccessibilityNodeInfo?=n
+            var level=0
+            while(p!=null && level<=8){
+                val rc=Rect(); p.getBoundsInScreen(rc)
+                log("交易紀錄 parent level=$level clickable=${p.isClickable} bounds=$rc class=${p.className?:""}")
+                if(p.isClickable && !rc.isEmpty){
+                    transactionClickPending=true
+                    transactionClickAt=System.currentTimeMillis()
+                    txAttempts++
+                    if(p.performAction(AccessibilityNodeInfo.ACTION_CLICK)){
+                        log("✓ ACTION_CLICK 已送出：parent level=$level bounds=$rc")
+                        h.postDelayed({step()},650); return
+                    }
+                    log("ACTION_CLICK 未成功，改用此容器動態 bounds 中心 gesture")
+                    tapTransaction(rc.exactCenterX(),rc.exactCenterY(),"parent level=$level bounds=$rc")
+                    return
+                }
+                p=p.parent; level++
+            }
+
+            // Some Compose nodes expose the label but no clickable ancestor.
+            // The fallback is still dynamic: use the current label bounds only.
+            if(!textRect.isEmpty){
+                transactionClickPending=true
+                transactionClickAt=System.currentTimeMillis()
+                txAttempts++
+                log("⚠ 無 clickable parent；改點目前「交易紀錄」文字 bounds 中心=$textRect")
+                tapTransaction(textRect.exactCenterX(),textRect.exactCenterY(),"text bounds=$textRect")
+                return
+            }
+        }
+
+        // Do not guess coordinates. First move the actual scroll container to the top,
+        // then re-read the tree. Abort after several analyses and dump the tree.
+        if(txAttempts<6){
+            val scroll=findScrollable(root)
+            if(scroll!=null){
+                val ok=scroll.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+                log("找不到「交易紀錄」node；捲到頂端後重掃 ACTION_SCROLL_BACKWARD=$ok (#${txAttempts+1})")
+            }else{
+                log("找不到「交易紀錄」node，且沒有 scrollable node；稍後重掃 (#${txAttempts+1})")
+            }
+            txAttempts++
+            h.postDelayed({step()},850)
+            return
+        }
+
+        log("⚠ V2.41 無法定位交易紀錄；停止猜座標。CURRENT_TREE:\n"+dumpTree(root).take(12000))
+        output(); finish()
+    }
+
+    private fun scanTransactions(root:AccessibilityNodeInfo,text:String){
+        val tree=dumpTree(root, 420)
+        val visible=visibleTexts(root)
+        visible.forEach{ collected.add(it) }
+        // V2.41 formal mode: do not persist every successful list-tree sample.
+
+        val parsed=parseTransactions(root)
+        val added=JkosTransactionStore.addAll(this,parsed)
+        if(added>0) newTransactionsThisRun += added
+        val total=JkosTransactionStore.load(this).size
+        if(added>0) log("✓ 增量解析 page=${page+1}: found=${parsed.size}, 新增=$added, 本次新增=$newTransactionsThisRun, total=$total")
+        else log("交易頁掃描 page=${page+1}: found=${parsed.size}, new=0, total=$total")
+
+        val list=findByViewId(root,"shop_record_listView")
+        val sig=parsed.joinToString("|"){it.key}
+        if(sig==lastSignature) stableSamples++ else stableSamples=0
+        lastSignature=sig
+        sample++
+
+        // First page can be partially populated for a moment. Sample it a few times.
+        if(sample<3 || (parsed.isEmpty() && sample<6)){
+            h.postDelayed({step()},650)
+            return
+        }
+
+        // V2.41: enrich every visible transaction before moving the RecyclerView.
+        // Old transactions from earlier versions are intentionally revisited once because
+        // they do not yet have detailChecked/payment information.
+        if(parsed.isNotEmpty()){

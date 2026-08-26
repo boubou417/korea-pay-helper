@@ -4,4 +4,5 @@
     <string name="title_activity_main">PayHelper</string>
     <string name="package_name">com.bou.payhelper</string>
     <string name="custom_url_scheme">com.bou.payhelper</string>
+    <string name="accessibility_desc">讀取街口、LINE Pay、Pi 拍錢包與 Google Wallet 的交易紀錄，協助自動建立消費記錄。</string>
 </resources>

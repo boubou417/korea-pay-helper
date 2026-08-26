@@ -1,0 +1,214 @@
+            log("✓ V2.41 明細解析完成 key=$currentDetailKey updated=$updated paymentMethod=${detail.paymentMethod} paymentAccount=${detail.paymentAccount} bank=${detail.bank} last4=${detail.cardLast4}")
+            stage=4
+            performGlobalAction(GLOBAL_ACTION_BACK)
+            h.postDelayed({step()},900)
+            return
+        }
+
+        // Only a true list page means the detail page has not appeared yet.
+        if(isTransactionListPage(root,text)){
+            detailWaitAttempts++
+            val elapsed=System.currentTimeMillis()-detailClickAt
+            if(elapsed<5500L){
+                if(detailWaitAttempts==1 || detailWaitAttempts%3==0)
+                    log("… 等待交易明細頁載入 key=$currentDetailKey elapsed=${elapsed}ms")
+                h.postDelayed({step()},600)
+                return
+            }
+            val failedTree=dumpTree(root,500).take(30000)
+            JkosTransactionDetailStore.add(this,currentDetailKey,"CLICK_FAILED_STILL_ON_TRANSACTION_LIST",failedTree)
+            detailFailedKeys.add(currentDetailKey)
+            log("⚠ V2.41 點擊 5.5 秒後仍是真正交易列表；本次同步略過此筆並繼續")
+            // Do not mark detailChecked on a real click failure; a later run may retry it.
+            stage=2
+            h.postDelayed({step()},500)
+            return
+        }
+
+        // During animations JKOS may briefly expose neither page. Keep waiting.
+        val elapsed=System.currentTimeMillis()-detailClickAt
+        if(elapsed<5500L){
+            h.postDelayed({step()},450)
+            return
+        }
+        val unknownTree=dumpTree(root,500).take(30000)
+        JkosTransactionDetailStore.add(this,currentDetailKey,"UNKNOWN_PAGE_AFTER_CLICK",unknownTree)
+        detailFailedKeys.add(currentDetailKey)
+        log("⚠ V2.41 點擊後頁面無法辨識；本次同步略過此筆並返回交易列表")
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        stage=4
+        h.postDelayed({step()},800)
+    }
+
+    private fun waitReturnFromDetail(root:AccessibilityNodeInfo,text:String){
+        if(isTransactionListPage(root,text)){
+            log("← V2.41 已返回交易列表；繼續處理同頁下一筆未補明細交易")
+            stage=2
+            sample=3 // list is already populated; avoid re-waiting three full samples after every detail
+            h.postDelayed({step()},350)
+            return
+        }
+        h.postDelayed({step()},450)
+    }
+
+    private fun parseDetail(root:AccessibilityNodeInfo):JkosTransactionDetail{
+        val pairs=LinkedHashMap<String,String>()
+        fun directValue(n:AccessibilityNodeInfo?, suffix:String, depth:Int=0):String{
+            if(n==null || depth>3)return ""
+            if(n.viewIdResourceName.orEmpty().endsWith("/$suffix")) return n.text?.toString()?.trim().orEmpty()
+            for(i in 0 until n.childCount){
+                val v=directValue(n.getChild(i),suffix,depth+1)
+                if(v.isNotBlank()) return v
+            }
+            return ""
+        }
+        fun walk(n:AccessibilityNodeInfo?,d:Int){
+            if(n==null||d>35)return
+            val title=directValue(n,"text_title")
+            val content=directValue(n,"text_content")
+            if(title.isNotBlank() && content.isNotBlank()) pairs[title]=content
+            for(i in 0 until n.childCount)walk(n.getChild(i),d+1)
+        }
+        walk(root,0)
+        val account=pairs["付款帳號/卡號"].orEmpty().ifBlank{pairs["付款帳號／卡號"].orEmpty()}
+        val last4=Regex("(?:\\*+|•+)?(\\d{4})\\]?$", RegexOption.IGNORE_CASE).find(account)?.groupValues?.getOrNull(1).orEmpty()
+        val bank=account.substringBefore("[").trim().ifBlank{
+            account.replace(Regex("[\\[（(].*"),"").trim()
+        }
+        return JkosTransactionDetail(
+            paymentMethod=pairs["付款方式"].orEmpty(),
+            paymentAccount=account,
+            bank=bank,
+            cardLast4=last4,
+            status=pairs["狀態"].orEmpty(),
+            orderAmount=pairs["訂單金額"].orEmpty(),
+            actualPaid=pairs["實際支付金額"].orEmpty()
+        )
+    }
+
+    private fun findRecordByKey(root:AccessibilityNodeInfo,key:String):AccessibilityNodeInfo?{
+        fun valueById(n:AccessibilityNodeInfo?, idSuffix:String):String{
+            if(n==null)return ""
+            if(n.viewIdResourceName.orEmpty().endsWith("/$idSuffix")) return n.text?.toString()?.trim().orEmpty()
+            for(i in 0 until n.childCount){ val v=valueById(n.getChild(i),idSuffix); if(v.isNotBlank())return v }
+            return ""
+        }
+        fun clickableAncestor(record:AccessibilityNodeInfo):AccessibilityNodeInfo?{
+            var p:AccessibilityNodeInfo?=record
+            var level=0
+            while(p!=null && level<=6){
+                val cur=p ?: break
+                val rc=Rect(); cur.getBoundsInScreen(rc)
+                log("V2.41 record parent level=$level clickable=${cur.isClickable} bounds=$rc class=${cur.className?:""} id=${cur.viewIdResourceName?:""}")
+                if(level>0 && cur.isClickable) return cur
+                p=cur.parent; level++
+            }
+            return null
+        }
+        fun walk(n:AccessibilityNodeInfo?,d:Int):AccessibilityNodeInfo?{
+            if(n==null||d>35)return null
+            if(n.viewIdResourceName.orEmpty().endsWith("/record_layout")){
+                val k="${valueById(n,"shop_date")}|${valueById(n,"shop_title")}|${valueById(n,"shop_price")}|${valueById(n,"pay_type")}" 
+                if(k==key){
+                    log("✓ V2.41 找到目標 record_layout key=$key；開始尋找 clickable parent")
+                    return clickableAncestor(n)
+                }
+            }
+            for(i in 0 until n.childCount){ val hit=walk(n.getChild(i),d+1); if(hit!=null)return hit }
+            return null
+        }
+        return walk(root,0)
+    }
+
+    private fun parseTransactions(root:AccessibilityNodeInfo):List<JkosTransaction>{
+        val out=ArrayList<JkosTransaction>()
+        fun valueById(n:AccessibilityNodeInfo?, idSuffix:String):String{
+            if(n==null)return ""
+            val id=n.viewIdResourceName.orEmpty()
+            if(id.endsWith("/$idSuffix")) return n.text?.toString()?.trim().orEmpty()
+            for(i in 0 until n.childCount){
+                val v=valueById(n.getChild(i),idSuffix)
+                if(v.isNotBlank())return v
+            }
+            return ""
+        }
+        fun walk(n:AccessibilityNodeInfo?, d:Int){
+            if(n==null||d>35)return
+            val id=n.viewIdResourceName.orEmpty()
+            if(id.endsWith("/record_layout")){
+                val shop=valueById(n,"shop_title")
+                val price=valueById(n,"shop_price")
+                val type=valueById(n,"pay_type")
+                val date=valueById(n,"shop_date")
+                if(shop.isNotBlank() && price.isNotBlank() && date.isNotBlank())
+                    out.add(JkosTransaction(shop,price,type,date,System.currentTimeMillis()))
+                return
+            }
+            for(i in 0 until n.childCount)walk(n.getChild(i),d+1)
+        }
+        walk(root,0)
+        return out.distinctBy{it.key}
+    }
+
+    private fun findByViewId(root:AccessibilityNodeInfo, idOrSuffix:String):AccessibilityNodeInfo?{
+        val currentId=root.viewIdResourceName.orEmpty()
+        val matched = if(idOrSuffix.contains(":id/")) {
+            currentId == idOrSuffix
+        } else {
+            currentId.endsWith("/$idOrSuffix")
+        }
+        if(matched) return root
+        for(i in 0 until root.childCount){
+            val c=root.getChild(i) ?: continue
+            val hit=findByViewId(c,idOrSuffix)
+            if(hit!=null) return hit
+        }
+        return null
+    }
+
+    private fun output(){
+        val lines=collected.filter{it.isNotBlank()}
+        val full=lines.joinToString("\n").take(18000)
+        if(full.isNotBlank()) JkosTransactionHistoryStore.add(this, full, System.currentTimeMillis())
+        val all=JkosTransactionStore.load(this)
+        val pending=all.count{!it.detailChecked}
+        log("✓ V2.41 同步摘要：總交易=${all.size}、本次新增=$newTransactionsThisRun、本次補明細=$completedDetailsThisRun、待補=$pending")
+    }
+
+    private fun isMy(t:String)=t.contains("街口帳戶") || (t.contains("交易紀錄")&&t.contains("支付工具"))
+    private fun isTransactionListPage(root:AccessibilityNodeInfo,t:String):Boolean{
+        if(t.contains("交易紀錄明細")) return false
+        if(t.contains("支付工具")&&t.contains("街口帳戶")) return false
+        return findByViewId(root,"shop_record_listView")!=null && t.contains("交易紀錄")
+    }
+    private fun isDetailPage(root:AccessibilityNodeInfo,t:String):Boolean{
+        if(t.contains("交易紀錄明細")) return true
+        return findByViewId(root,"recycler_view")!=null && findByViewId(root,"layout_block_items")!=null
+    }
+    private fun findExact(root:AccessibilityNodeInfo,s:String):AccessibilityNodeInfo?{
+        // Compose can show a TextView in the tree dump while
+        // findAccessibilityNodeInfosByText() temporarily returns an empty list.
+        // Walk the live tree ourselves so the node used for clicking is the same
+        // node tree that we can see in diagnostics.
+        var fallback: AccessibilityNodeInfo? = null
+        fun walk(n: AccessibilityNodeInfo?, depth: Int):AccessibilityNodeInfo? {
+            if(n==null || depth>35) return null
+            val text=n.text?.toString()?.trim().orEmpty()
+            val desc=n.contentDescription?.toString()?.trim().orEmpty()
+            if(text==s || desc==s) return n
+            if(fallback==null && (text.contains(s) || desc.contains(s))) fallback=n
+            for(i in 0 until n.childCount){
+                val hit=walk(n.getChild(i),depth+1)
+                if(hit!=null) return hit
+            }
+            return null
+        }
+        return walk(root,0) ?: fallback
+    }
+    private fun findBestVisibleExact(root:AccessibilityNodeInfo,s:String):AccessibilityNodeInfo?{
+        val dm=resources.displayMetrics
+        val screen=Rect(0,0,dm.widthPixels,dm.heightPixels)
+        var best:AccessibilityNodeInfo?=null
+        var bestScore=Int.MIN_VALUE
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>40) return

@@ -1,0 +1,175 @@
+            scheduleLinePayFormal(500)
+            return
+        }
+        linePayHistoryEmptyPolls=0
+        val pageFingerprint=parsed.joinToString("|"){it.key}
+        val nowPage=System.currentTimeMillis()
+        val duplicatePage=(pageFingerprint.isNotBlank() && pageFingerprint==linePayLastProcessedPageFingerprint && nowPage-linePayLastProcessedPageAt<1200L)
+        if(duplicatePage){
+            scheduleLinePayFormal(280)
+            return
+        }
+        linePayLastProcessedPageFingerprint=pageFingerprint
+        linePayLastProcessedPageAt=nowPage
+        val added=LinePayTransactionStore.merge(this,parsed)
+        linePayNewThisRun+=added
+        log("✓ V2.41 LINE Pay 歷史頁 #${linePayHistoryPage+1}：visible=${parsed.size}、新增=$added、總數=${LinePayTransactionStore.load(this).size}")
+
+        val current=LinePayTransactionStore.load(this).associateBy{it.key}
+        val pending=parsed.firstOrNull{ current[it.key]?.detailChecked != true }
+        if(pending!=null){
+            linePayConsecutiveKnownPages=0
+            h.postDelayed({ clickLinePayTransaction(pending) },280)
+            return
+        }
+
+        val pageOnlyKnownAtStart=parsed.all{it.key in linePayKnownAtStart}
+        if(pageOnlyKnownAtStart && (!linePayFullHistoryMode || !linePayRepairMode)) linePayConsecutiveKnownPages++ else linePayConsecutiveKnownPages=0
+        if(!linePayFullHistoryMode && linePayConsecutiveKnownPages>=2){
+            log("✓ V2.41 LINE Pay 快速同步已連續看到 2 個全為既有完整交易的歷史畫面；本次新增=$linePayNewThisRun、補明細=$linePayDetailsThisRun，提早結束")
+            stopLinePayFormal(returnToApp=true)
+            return
+        }
+        scrollLinePayHistory(root, parsed.joinToString("|"){it.key})
+    }
+
+    private fun isLinePayDetailPage(text:String):Boolean = text.contains("付款詳細資訊") && text.contains("付款方式")
+
+    private fun isLinePayHistoryListPage(root:AccessibilityNodeInfo):Boolean{
+        val items=linePayHistoryTexts(root)
+        val joined=items.joinToString("\n")
+        if(joined.contains("付款詳細資訊")) return false
+        if(isLinePayHomePreview(root)) return false
+        val title=items.take(30).any{it.trim() in setOf("交易紀錄","付款紀錄","交易記錄","付款記錄")}
+        return title || (linePayHistoryEntered && isLinePayLiffContext(root) && parseLinePayTransactionRows(root).isNotEmpty())
+    }
+
+    private fun isLinePayHomePreview(root:AccessibilityNodeInfo):Boolean{
+        val joined=visibleTexts(root).joinToString("\n")
+        return joined.contains("我的優惠券") || (joined.contains("LINE POINTS") && joined.contains("付款條碼"))
+    }
+
+    private fun isLinePayLiffContext(root:AccessibilityNodeInfo):Boolean{
+        var found=false
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>25 || found) return
+            val id=n.viewIdResourceName.orEmpty()
+            val cls=n.className?.toString().orEmpty()
+            if(id.contains("liff_container") || id.contains("liff_webview") || cls=="android.webkit.WebView") { found=true; return }
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0); return found
+    }
+
+    private fun linePayHistoryTexts(root:AccessibilityNodeInfo):List<String>{
+        val ordered=ArrayList<String>()
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>45 || ordered.size>1200) return
+            n.text?.toString()?.trim()?.takeIf{it.isNotBlank()}?.let{ordered.add(it)}
+            n.contentDescription?.toString()?.trim()?.takeIf{it.isNotBlank() && it!="Image"}?.let{ordered.add(it)}
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0)
+        return ordered
+    }
+
+    private fun parseLinePayDetail(root:AccessibilityNodeInfo):LinePayDetail{
+        val items=allTextsInOrder(root)
+        fun after(label:String):String{
+            val i=items.indexOfFirst{it.trim()==label}
+            if(i<0) return ""
+            for(j in i+1 until minOf(items.size,i+7)){
+                val v=items[j].trim()
+                if(v.isNotBlank() && v!=label && v !in setOf("복사","close","merchant","메시지 입력")) return v
+            }
+            return ""
+        }
+        val account=after("付款方式")
+        val last4=Regex("(?:\\*+\\s*){2,}([0-9]{4})|([0-9]{4})").find(account)?.groupValues?.drop(1)?.firstOrNull{it.isNotBlank()}.orEmpty()
+        val bank=account.substringAfterLast("/","").trim()
+        val prefix=account.substringBefore("/").replace(Regex("\\*|[0-9]"),"").replace(Regex("\\s+"),"").trim()
+        val type=Regex("^(VISA|MASTER|MASTERCARD|JCB|AMEX|UNIONPAY)",RegexOption.IGNORE_CASE).find(prefix)?.value.orEmpty().uppercase()
+        val cardName=if(type.isNotBlank()) prefix.removePrefix(type).trim() else prefix
+        val method=when{
+            account.contains("****") || last4.isNotBlank() -> "信用卡"
+            account.isNotBlank() -> "其他付款方式"
+            else -> ""
+        }
+        return LinePayDetail(
+            paymentMethod=method,
+            paymentAccount=account,
+            bank=bank,
+            cardLast4=last4,
+            cardType=type,
+            cardName=cardName,
+            transactionId=after("交易號碼"),
+            productName=after("商品"),
+            orderAmount=after("商品價格"),
+            actualPaid=after("實際支付金額")
+        )
+    }
+
+    private fun hasLinePayHistoryTransactionSignals(items:List<String>):Boolean{
+        val amountRe=Regex("^(?:NT\\$|NTD|TWD)\\s*[-+]?[0-9,]+(?:\\.[0-9]+)?$",RegexOption.IGNORE_CASE)
+        val dateRe=Regex("^\\d{4}[./-]\\d{2}[./-]\\d{2}\\s+\\d{2}:\\d{2}(?::\\d{2})?(?:\\s*\\(GMT[+-]\\d{2}:?\\d{2}\\))?$")
+        return items.any{amountRe.matches(it.trim())} && items.any{dateRe.matches(it.trim())}
+    }
+
+    private fun parseLinePayTransactionRows(root:AccessibilityNodeInfo):List<LinePayRow>{
+        val out=ArrayList<LinePayRow>()
+        val amountRe=Regex("^(?:NT\\$|NTD|TWD)\\s*[-+]?[0-9,]+(?:\\.[0-9]+)?$",RegexOption.IGNORE_CASE)
+        val dateRe=Regex("^\\d{4}[./-]\\d{2}[./-]\\d{2}\\s+\\d{2}:\\d{2}(?::\\d{2})?(?:\\s*\\(GMT[+-]\\d{2}:?\\d{2}\\))?$")
+        val rangeRe=Regex("^\\d{4}[./-]\\d{2}[./-]\\d{2}\\s*[~～-]\\s*\\d{4}[./-]\\d{2}[./-]\\d{2}$")
+        val ignored=setOf("付款","細節","寫評論","交易紀錄","close","全部付款方式","近1個月","前3個月")
+        fun collect(n:AccessibilityNodeInfo?,depth:Int=0, dst:MutableList<String>){
+            if(n==null || depth>8 || dst.size>80) return
+            n.text?.toString()?.trim()?.takeIf{it.isNotBlank()}?.let{dst.add(it)}
+            n.contentDescription?.toString()?.trim()?.takeIf{it.isNotBlank() && it!="Image"}?.let{dst.add(it)}
+            for(i in 0 until n.childCount) collect(n.getChild(i),depth+1,dst)
+        }
+        fun merchant(items:List<String>,dateIndex:Int,amountIndex:Int):String{
+            for(i in dateIndex+1 until amountIndex){
+                val v=items[i].trim()
+                if(v.isNotBlank() && v !in ignored && !amountRe.matches(v) && !dateRe.matches(v) && !rangeRe.matches(v) && !v.startsWith("http")) return v
+            }
+            for(i in dateIndex-1 downTo 0){
+                val v=items[i].trim()
+                if(v.isNotBlank() && v !in ignored && !amountRe.matches(v) && !dateRe.matches(v) && !rangeRe.matches(v) && !v.startsWith("http")) return v
+            }
+            return ""
+        }
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>45) return
+            if(n.isClickable){
+                val rc=Rect(); n.getBoundsInScreen(rc)
+                if(rc.width()>500 && rc.height() in 180..900){
+                    val items=ArrayList<String>(); collect(n,0,items)
+                    val dateIndex=items.indexOfFirst{dateRe.matches(it.trim())}
+                    val amountIndex=items.indexOfFirst{amountRe.matches(it.trim())}
+                    if(dateIndex>=0 && amountIndex>dateIndex){
+                        val shop=merchant(items,dateIndex,amountIndex)
+                        if(shop.isNotBlank() && !rangeRe.matches(shop)){
+                            val dateRaw=items[dateIndex].trim()
+                            val amountRaw=items[amountIndex].trim()
+                            val normalizedDate=dateRaw.substringBefore(" (GMT").replace('.','/').replace('-','/')
+                            val amount=amountRaw.replace(Regex("^(NT\\$|NTD|TWD)\\s*",RegexOption.IGNORE_CASE),"").trim()
+                            out.add(LinePayRow(LinePayTransaction(shop=shop,amount=amount,date=normalizedDate,capturedAt=System.currentTimeMillis()),n,Rect(rc)))
+                        }
+                    }
+                }
+            }
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0)
+        return out.distinctBy{it.tx.key}.sortedBy{it.bounds.top}
+    }
+
+    private fun parseLinePayTransactions(items:List<String>):List<LinePayTransaction>{
+        val out=ArrayList<LinePayTransaction>()
+        val amountRe=Regex("^(?:NT\\$|NTD|TWD)\\s*[-+]?[0-9,]+(?:\\.[0-9]+)?$",RegexOption.IGNORE_CASE)
+        val dateRe=Regex("^\\d{4}[./-]\\d{2}[./-]\\d{2}\\s+\\d{2}:\\d{2}(?::\\d{2})?(?:\\s*\\(GMT[+-]\\d{2}:?\\d{2}\\))?$")
+        val ignored=setOf(
+            "交易紀錄","信用卡/簽帳金融卡","我的選單","編輯","寫評論","付款條碼","掃描","乘車碼","All Menu","服務公告",
+            "付款日期","請款日期","交易號碼","商品","付款方式","交易經由","商品價格","實際支付金額","close","全部付款方式",
+            "近1個月","前3個月","付款","細節"
+        )

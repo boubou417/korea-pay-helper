@@ -1,0 +1,199 @@
+        fun isSectionDate(v:String)=Regex("^\\d{4}[./-]\\d{2}[./-]\\d{2}$").matches(v)
+        fun isNoise(v:String)=v.isBlank() || v in ignored || isSectionDate(v) || v.startsWith("http://") || v.startsWith("https://")
+
+        // LINE exposes two orders depending on page:
+        //   home preview: shop -> amount -> datetime
+        //   dedicated history: shop -> datetime -> amount
+        // Search a small forward window and accept either order.
+        for(i in items.indices){
+            val shop=items[i].trim()
+            if(isNoise(shop) || amountRe.matches(shop) || dateRe.matches(shop)) continue
+            var amountIndex=-1
+            var dateIndex=-1
+            for(j in i+1..minOf(i+7,items.lastIndex)){
+                val v=items[j].trim()
+                if(amountIndex<0 && amountRe.matches(v)) amountIndex=j
+                if(dateIndex<0 && dateRe.matches(v)) dateIndex=j
+                if(amountIndex>0 && dateIndex>0) break
+            }
+            if(amountIndex<0 || dateIndex<0) continue
+            // Prevent accidentally pairing a merchant with a later unrelated row.
+            if(kotlin.math.abs(amountIndex-dateIndex)>4) continue
+            val amountRaw=items[amountIndex].trim()
+            val dateRaw=items[dateIndex].trim()
+            val normalizedDate=dateRaw.substringBefore(" (GMT").replace('.','/').replace('-','/')
+            val amount=amountRaw.replace(Regex("^(NT\\$|NTD|TWD)\\s*",RegexOption.IGNORE_CASE),"").trim()
+            out.add(LinePayTransaction(shop=shop,amount=amount,date=normalizedDate,capturedAt=System.currentTimeMillis()))
+        }
+        return out.distinctBy{it.key}
+    }
+
+    private fun clickLinePayTransaction(target:LinePayTransaction){
+        if(!linePayFormalMode || linePayCurrentDetailKey.isNotBlank()) return
+        val root=rootInActiveWindow ?: return
+        val rows=parseLinePayTransactionRows(root)
+        val row=rows.firstOrNull{it.tx.key==target.key} ?: run{
+            log("⚠ V2.41 LINE Pay 找到交易資料但無法定位同一 transaction container：${target.key}")
+            return
+        }
+        val result=clickLineNodeOrParent(row.node,"LINE Pay transaction ${target.shop}")
+        if(result!="FAILED"){
+            linePayCurrentDetailKey=target.key
+            linePayDetailClickedAt=System.currentTimeMillis(); linePayDetailParseAttempts=0; linePayReturnPending=false
+            linePayDetailSuccessCommitted=false
+            log("→ V2.41 點擊 LINE Pay 交易 result=$result key=${target.key}")
+            h.postDelayed({ captureLinePayDiagnostic(null); scheduleLinePayFormal(80) },850)
+        } else log("⚠ V2.41 無法點擊 LINE Pay 交易 key=${target.key}")
+    }
+
+    private fun findLinePayTransactionRow(root:AccessibilityNodeInfo,target:LinePayTransaction):AccessibilityNodeInfo?{
+        val amountText="NT$ ${target.amount}"
+        val dateDot=target.date.replace('/','.')
+        var hit:AccessibilityNodeInfo?=null
+        fun subtreeContains(n:AccessibilityNodeInfo?,needle:String,depth:Int=0):Boolean{
+            if(n==null || depth>6) return false
+            val t=n.text?.toString()?.trim().orEmpty(); val d=n.contentDescription?.toString()?.trim().orEmpty()
+            if(t==needle || d==needle || t.startsWith(needle) || d.startsWith(needle)) return true
+            for(i in 0 until n.childCount) if(subtreeContains(n.getChild(i),needle,depth+1)) return true
+            return false
+        }
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>40 || hit!=null) return
+            val t=n.text?.toString()?.trim().orEmpty(); val d=n.contentDescription?.toString()?.trim().orEmpty()
+            if(t==target.shop || d==target.shop){
+                var p:AccessibilityNodeInfo?=n
+                repeat(7){
+                    val cur=p ?: return@repeat
+                    if(subtreeContains(cur,amountText) && subtreeContains(cur,dateDot)) { hit=cur; return }
+                    p=cur.parent
+                }
+            }
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0)
+        return hit ?: findBestVisibleExact(root,target.shop)
+    }
+
+    private fun scrollLinePayHistory(root:AccessibilityNodeInfo,signature:String){
+        if(linePayHistoryScrollInFlight) return
+        linePayHistoryScrollInFlight=true
+        linePayHistoryBeforeScrollSignature=signature
+        linePayHistoryFallbackUsed=false
+        val sc=findLargestScrollable(root) ?: findScrollable(root)
+        val ok=sc?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)==true
+        log("↓ V2.41 LINE Pay 歷史列表 scrollForward=$ok page=${linePayHistoryPage+1}")
+        if(!ok){
+            linePayHistoryFallbackUsed=true
+            swipeLinePayHistory(root)
+        }
+        h.postDelayed({ checkLinePayHistoryScroll() },1050)
+    }
+
+    private fun checkLinePayHistoryScroll(){
+        if(!linePayFormalMode || !linePayHistoryScrollInFlight) return
+        val root=rootInActiveWindow ?: run{ h.postDelayed({checkLinePayHistoryScroll()},350); return }
+        val parsed=parseLinePayTransactionRows(root).map{it.tx}
+        val sig=parsed.joinToString("|"){it.key}
+        if(sig.isNotBlank() && sig!=linePayHistoryBeforeScrollSignature){
+            linePayHistoryPage++
+            linePayHistoryNoMove=0
+            linePayHistoryScrollInFlight=false
+            linePayHistoryFallbackUsed=false
+            scheduleLinePayFormal(250)
+            return
+        }
+        if(!linePayHistoryFallbackUsed){
+            linePayHistoryFallbackUsed=true
+            log("↓ V2.41 LINE Pay ACTION_SCROLL_FORWARD 後內容未變，改用目前畫面 bounds swipe")
+            swipeLinePayHistory(root)
+            h.postDelayed({checkLinePayHistoryScroll()},1100)
+            return
+        }
+        linePayHistoryNoMove++
+        linePayHistoryScrollInFlight=false
+        log("… V2.41 LINE Pay 歷史列表內容未再移動 count=$linePayHistoryNoMove")
+        if(linePayHistoryNoMove>=2){
+            if(!linePayFullHistoryMode){
+                log("✓ V2.41 LINE Pay 快速同步已到目前歷史視窗底部；不開啟『前3個月』，結束本次快速同步")
+                stopLinePayFormal(returnToApp=true)
+                return
+            }
+            // LINE Pay history can expose a clickable "前3個月" range at the end of
+            // the current month window.  Prefer opening it before declaring the real
+            // history bottom, otherwise older transactions are silently skipped.
+            if(tryOpenOlderLinePayHistory(root)){
+                linePayHistoryNoMove=0
+                linePayHistoryPage++
+                linePayHistoryScrollInFlight=false
+                scheduleLinePayFormal(900)
+                return
+            }
+            log("✓ V2.41 LINE Pay 已到歷史列表底部；沒有可開啟的更早區間，完成本次同步")
+            stopLinePayFormal(returnToApp=true)
+        } else scheduleLinePayFormal(300)
+    }
+
+    private fun tryOpenOlderLinePayHistory(root:AccessibilityNodeInfo):Boolean{
+        val candidates=listOf("前3個月","前 3 個月","過去3個月","過去 3 個月","更早紀錄","更多紀錄")
+        for(label in candidates){
+            val n=findBestVisibleExact(root,label) ?: continue
+            val result=clickLineNodeOrParent(n,"LINE Pay older history $label")
+            if(result!="NO_CLICKABLE_BOUNDS"){
+                log("→ V2.41 LINE Pay 開啟更早歷史區間 [$label] result=$result")
+                linePayHistoryBeforeScrollSignature=""
+                linePayHistoryFallbackUsed=false
+                linePayOlderRangeOpened=true
+                linePayLastProcessedPageFingerprint=""
+                linePayHistoryOpenedAt=System.currentTimeMillis()
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun swipeLinePayHistory(root:AccessibilityNodeInfo){
+        val dm=resources.displayMetrics
+        val rc=Rect()
+        val sc=findLargestScrollable(root) ?: findScrollable(root)
+        sc?.getBoundsInScreen(rc)
+        val left=if(!rc.isEmpty) rc.left.coerceAtLeast(0) else 0
+        val right=if(!rc.isEmpty) rc.right.coerceAtMost(dm.widthPixels) else dm.widthPixels
+        val top=if(!rc.isEmpty) rc.top.coerceAtLeast(0) else (dm.heightPixels*0.25).toInt()
+        val bottom=if(!rc.isEmpty) rc.bottom.coerceAtMost(dm.heightPixels) else (dm.heightPixels*0.92).toInt()
+        val x=((left+right)/2f).coerceIn(80f,dm.widthPixels-80f)
+        val y1=(bottom-(bottom-top)*0.18f).coerceIn(300f,dm.heightPixels-120f)
+        val y2=(top+(bottom-top)*0.28f).coerceIn(180f,dm.heightPixels-300f)
+        val path=Path(); path.moveTo(x,y1); path.lineTo(x,y2)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(path,0,420)).build()
+        dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){ log("✓ V2.41 LINE Pay 歷史 swipe completed") }
+            override fun onCancelled(gd:GestureDescription?){ log("⚠ V2.41 LINE Pay 歷史 swipe cancelled") }
+        },null)
+    }
+
+    private fun findLargestScrollable(root:AccessibilityNodeInfo):AccessibilityNodeInfo?{
+        var best:AccessibilityNodeInfo?=null; var bestArea=0L
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>40) return
+            if(n.isScrollable){
+                val r=Rect(); n.getBoundsInScreen(r)
+                val area=r.width().toLong()*r.height().toLong()
+                if(area>bestArea){bestArea=area;best=n}
+            }
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0); return best
+    }
+
+    private fun allTextsInOrder(root:AccessibilityNodeInfo):List<String>{
+        val out=ArrayList<String>()
+        fun walk(n:AccessibilityNodeInfo?,depth:Int){
+            if(n==null || depth>45 || out.size>700) return
+            n.text?.toString()?.trim()?.takeIf{it.isNotBlank()}?.let{out.add(it)}
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0); return out
+    }
+
+    private fun stopLinePayFormal(returnToApp:Boolean){
+        if(!linePayFormalMode) return

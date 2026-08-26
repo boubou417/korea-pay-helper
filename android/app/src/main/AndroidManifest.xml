@@ -1,5 +1,17 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <queries>
+        <package android:name="com.jkos.app" />
+        <package android:name="com.linepaytw.upay" />
+        <package android:name="jp.naver.line.android" />
+        <package android:name="tw.com.pchome.android.pi" />
+        <package android:name="com.google.android.apps.walletnfcrel" />
+    </queries>
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
     <application
         android:allowBackup="true"
         android:icon="@mipmap/ic_launcher"
@@ -20,6 +32,21 @@
             </intent-filter>
         </activity>
 
+        <receiver android:name=".NightlySyncReceiver" android:exported="false" />
+
+        <service
+            android:name="tw.apostar.notificationpaytest.PayAccessibilityService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true"
+            android:label="Pay Helper 自動消費同步">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"
@@ -28,8 +55,4 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
     </application>
-
-    <!-- Permissions -->
-
-    <uses-permission android:name="android.permission.INTERNET" />
 </manifest>

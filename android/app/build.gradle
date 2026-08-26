@@ -1,35 +1,40 @@
 apply plugin: 'com.android.application'
+apply plugin: 'org.jetbrains.kotlin.android'
+
+def autoCaptureGeneratedDir = file("$buildDir/generated/source/payhelperAutoCapture")
+
+tasks.register("generatePayHelperAutoCaptureService") {
+    def partsDir = file("src/main/autocapture_service_parts")
+    def outFile = file("$autoCaptureGeneratedDir/tw/apostar/notificationpaytest/PayAccessibilityService.kt")
+    inputs.dir(partsDir)
+    outputs.file(outFile)
+    doLast {
+        outFile.parentFile.mkdirs()
+        def parts = partsDir.listFiles()?.findAll { it.name.endsWith('.ktpart') }?.sort { a, b -> a.name <=> b.name } ?: []
+        if (parts.isEmpty()) throw new GradleException("Missing PayAccessibilityService source parts")
+        outFile.setText(parts.collect { it.getText('UTF-8') }.join(''), 'UTF-8')
+    }
+}
 
 android {
     namespace = "com.bou.payhelper"
     compileSdk = rootProject.ext.compileSdkVersion
+    sourceSets { main.java.srcDir autoCaptureGeneratedDir }
     defaultConfig {
         applicationId "com.bou.payhelper"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode 6020
+        versionName "6.1.2-unified-handoff-test"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-        aaptOptions {
-             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
-             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
-            ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
-        }
+        aaptOptions { ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~' }
     }
-    buildTypes {
-        release {
-            minifyEnabled false
-            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
-        }
-    }
+    kotlinOptions { jvmTarget = "21" }
+    buildTypes { release { minifyEnabled false; proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro' } }
 }
 
-repositories {
-    flatDir{
-        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
-    }
-}
-
+tasks.named("preBuild").configure { dependsOn("generatePayHelperAutoCaptureService") }
+repositories { flatDir { dirs 'libs'; def cordovaLibs=file('../capacitor-cordova-android-plugins/src/main/libs'); if(cordovaLibs.exists()) dirs cordovaLibs } }
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
@@ -39,16 +44,7 @@ dependencies {
     testImplementation "junit:junit:$junitVersion"
     androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
     androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
-    implementation project(':capacitor-cordova-android-plugins')
+    if (rootProject.findProject(':capacitor-cordova-android-plugins') != null) implementation project(':capacitor-cordova-android-plugins')
 }
-
 apply from: 'capacitor.build.gradle'
-
-try {
-    def servicesJSON = file('google-services.json')
-    if (servicesJSON.text) {
-        apply plugin: 'com.google.gms.google-services'
-    }
-} catch(Exception e) {
-    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
-}
+try { def servicesJSON=file('google-services.json'); if(servicesJSON.text) apply plugin:'com.google.gms.google-services' } catch(Exception e) { logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work") }

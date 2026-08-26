@@ -1,0 +1,203 @@
+            val stored=JkosTransactionStore.load(this).associateBy{it.key}
+            val target=parsed.firstOrNull{ stored[it.key]?.detailChecked != true && it.key !in detailFailedKeys }
+            if(target!=null){
+                val listRc=Rect(); list?.getBoundsInScreen(listRc)
+                val dm=resources.displayMetrics
+                val listOnScreen=list!=null && !listRc.isEmpty && listRc.left < dm.widthPixels && listRc.right > 0
+                if(!listOnScreen){
+                    log("… 待補明細交易已出現，但交易清單仍在頁面轉場中 bounds=$listRc；等待穩定")
+                    h.postDelayed({step()},450)
+                    return
+                }
+                currentDetailKey=target.key
+                log("→ V2.41 準備擷取交易明細 key=${target.key}")
+                if(openDetail(root,target.key)) return
+            }
+        }
+
+        // V2.41 normal daily sync: once two consecutive list positions contain only
+        // transactions that existed before this run and whose details are complete,
+        // we have crossed the new/old boundary and can stop without scanning months of history.
+        val storedNow=JkosTransactionStore.load(this).associateBy{it.key}
+        val knownCompletePage=parsed.isNotEmpty() && parsed.all{ tx ->
+            tx.key in knownAtStart && storedNow[tx.key]?.detailChecked==true
+        }
+        if(!repairMode && knownCompletePage) consecutiveKnownPages++ else consecutiveKnownPages=0
+        if(!repairMode && consecutiveKnownPages>=2 && page>=1){
+            log("✓ V2.41 已連續看到 $consecutiveKnownPages 個既有完整交易畫面；本次新增=$newTransactionsThisRun、補明細=$completedDetailsThisRun，提早結束增量同步")
+            output(); finish(); return
+        }
+
+        // End detection must use the actual visible list signature, not total stored count.
+        // Existing installs may already contain 30+ transactions from older versions, while
+        // V2.41 still needs to revisit them to add payment/card details.
+        if(sig.isNotBlank() && sig==lastCompletedPageSignature) noNewPages++ else {
+            noNewPages=0
+            if(sig.isNotBlank()) lastCompletedPageSignature=sig
+        }
+        if(noNewPages>=3 && page>0){
+            val remaining=JkosTransactionStore.load(this).count{!it.detailChecked && it.key !in detailFailedKeys}
+            if(remaining>0 && revisitPass<2){
+                revisitPass++
+                log("↟ V2.41 第一輪已到尾端，但仍有 $remaining 筆 detailChecked=false；開始回到交易清單最上方補齊 (pass=$revisitPass)")
+                stage=5; rewindStable=0; rewindLastSignature=""
+                h.postDelayed({step()},500); return
+            }
+            log("✓ V2.41 交易清單內容連續 $noNewPages 次未再變化；剩餘未檢查=$remaining，結束同步")
+            output(); finish(); return
+        }
+        if(page>=79){
+            val remaining=JkosTransactionStore.load(this).count{!it.detailChecked && it.key !in detailFailedKeys}
+            if(remaining>0 && revisitPass<2){
+                revisitPass++
+                log("↟ V2.41 達安全上限但仍有 $remaining 筆未檢查；先回頂端補齊 (pass=$revisitPass)")
+                stage=5; rewindStable=0; rewindLastSignature=""
+                h.postDelayed({step()},500); return
+            }
+            log("✓ V2.41 已達安全上限 80 頁；剩餘未檢查=$remaining")
+            output(); finish(); return
+        }
+
+        if(list!=null){
+            val rc=Rect(); list.getBoundsInScreen(rc)
+            val before=sig
+            val ok=list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)
+            log("交易清單 shop_record_listView ACTION_SCROLL_FORWARD=$ok bounds=$rc page=${page+1}")
+            if(ok){
+                page++; sample=0; stableSamples=0; lastSignature=before
+                h.postDelayed({verifyListMoved(before,0)},900)
+                return
+            }
+            if(!rc.isEmpty){
+                log("RecyclerView action 失敗；改在交易清單 bounds 內 swipe")
+                page++; sample=0; stableSamples=0; lastSignature=before
+                swipe(rc.exactCenterX(), rc.bottom-80f, rc.exactCenterX(), rc.top+120f)
+                return
+            }
+        }
+
+        log("⚠ 找不到 shop_record_listView；保存目前已解析交易後結束")
+        output(); finish()
+    }
+
+
+    private fun rewindToTop(root:AccessibilityNodeInfo,text:String){
+        if(!isTransactionListPage(root,text)){
+            h.postDelayed({step()},450); return
+        }
+        val parsed=parseTransactions(root)
+        val sig=parsed.joinToString("|"){it.key}
+        if(sig.isNotBlank() && sig==rewindLastSignature) rewindStable++ else {
+            rewindStable=0
+            if(sig.isNotBlank()) rewindLastSignature=sig
+        }
+        val list=findByViewId(root,"shop_record_listView")
+        if(list==null){
+            log("… V2.41 回頂端時暫時找不到 shop_record_listView；稍後重試")
+            h.postDelayed({step()},450); return
+        }
+        val rc=Rect(); list.getBoundsInScreen(rc)
+        val ok=list.performAction(AccessibilityNodeInfo.ACTION_SCROLL_BACKWARD)
+        log("↟ V2.41 回頂端 ACTION_SCROLL_BACKWARD=$ok stable=$rewindStable bounds=$rc")
+        if(ok && rewindStable<3){
+            h.postDelayed({step()},500); return
+        }
+        if(!ok && !rc.isEmpty && rewindStable<2){
+            log("↟ V2.41 backward action 未移動；改用 RecyclerView 區域向下 swipe 回頂端")
+            swipe(rc.exactCenterX(),rc.top+140f,rc.exactCenterX(),rc.bottom-90f)
+            return
+        }
+
+        val remaining=JkosTransactionStore.load(this).count{!it.detailChecked && it.key !in detailFailedKeys}
+        if(initialRewindPending){
+            initialRewindPending=false; initialRewindDone=true
+            log("✓ V2.41 已回到交易清單最上方；從最新交易開始。既有=${knownAtStart.size}、待補=$remaining")
+        }else{
+            log("✓ V2.41 已回到交易清單頂端；開始補齊未完成交易，待補=$remaining")
+        }
+        stage=2; page=0; sample=0; stableSamples=0; noNewPages=0; consecutiveKnownPages=0
+        lastCompletedPageSignature=""; lastSignature=""; rewindStable=0; rewindLastSignature=""
+        h.postDelayed({step()},700)
+    }
+
+    private fun verifyListMoved(before:String, attempt:Int){
+        if(!running || stage!=2)return
+        val root=rootInActiveWindow ?: run { h.postDelayed({verifyListMoved(before,attempt)},350); return }
+        val now=parseTransactions(root).joinToString("|"){it.key}
+        if(now.isNotBlank() && now!=before){
+            log("✓ 交易清單內容已變更")
+            h.postDelayed({step()},250)
+            return
+        }
+        if(attempt<2){
+            h.postDelayed({verifyListMoved(before,attempt+1)},450)
+            return
+        }
+        val list=findByViewId(root,"shop_record_listView")
+        val rc=Rect(); list?.getBoundsInScreen(rc)
+        if(list!=null && !rc.isEmpty){
+            log("⚠ ACTION_SCROLL_FORWARD 回傳成功但交易內容未變；改用 RecyclerView 區域 swipe")
+            swipe(rc.exactCenterX(), rc.bottom-80f, rc.exactCenterX(), rc.top+120f)
+        }else{
+            h.postDelayed({step()},300)
+        }
+    }
+
+    private fun openDetail(root:AccessibilityNodeInfo,key:String):Boolean{
+        val row=findRecordByKey(root,key)
+        if(row==null){
+            log("⚠ V2.41 找不到待擷取明細列 key=$key；本頁先略過")
+            return false
+        }
+        currentDetailKey=key
+        val rc=Rect(); row.getBoundsInScreen(rc)
+        val dm=resources.displayMetrics
+        if(rc.isEmpty || rc.right<=0 || rc.left>=dm.widthPixels || rc.bottom<=0 || rc.top>=dm.heightPixels){
+            log("… V2.41 找到 clickable parent，但 bounds 尚未進入目前螢幕：$rc；等待頁面穩定")
+            h.postDelayed({step()},450)
+            return true
+        }
+        stage=3
+        detailClickAt=System.currentTimeMillis(); detailParseAttempts=0
+        detailWaitAttempts=0
+        val ok=row.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        log("→ V2.41 點擊交易 clickable parent ACTION_CLICK=$ok key=$key bounds=$rc class=${row.className}")
+        if(!ok){
+            log("⚠ clickable parent ACTION_CLICK 失敗；使用該 parent 動態 bounds 中心 gesture")
+            val p=Path(); p.moveTo(rc.exactCenterX(),rc.exactCenterY())
+            val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,80)).build()
+            dispatchGesture(g,object:GestureResultCallback(){
+                override fun onCompleted(gd:GestureDescription?){ log("✓ V2.41 transaction parent gesture click completed") }
+                override fun onCancelled(gd:GestureDescription?){ log("⚠ V2.41 transaction parent gesture click cancelled") }
+            },null)
+        }
+        h.postDelayed({step()},1200)
+        return true
+    }
+
+    private fun captureDetailPage(root:AccessibilityNodeInfo,text:String){
+        if(isDetailPage(root,text)){
+            detailWaitAttempts=0
+            val detailText=visibleTexts(root).joinToString("\n").take(16000)
+            val tree=dumpTree(root,520).take(32000)
+            val detail=parseDetail(root)
+            if(!JkosTransactionStore.isDetailComplete(detail)){
+                detailParseAttempts++
+                if(detailParseAttempts <= 5){
+                    log("… V2.41 已進明細頁但付款方式尚未建立，重讀 ${detailParseAttempts}/5 key=$currentDetailKey")
+                    h.postDelayed({step()},450)
+                    return
+                }
+                JkosTransactionDetailStore.add(this,currentDetailKey,"DETAIL_INCOMPLETE_NO_PAYMENT_METHOD\n"+detailText,tree)
+                detailFailedKeys.add(currentDetailKey)
+                log("⚠ V2.41 明細頁已開啟但連續重讀仍沒有付款方式；保持 detailChecked=false，稍後/下次可重試 key=$currentDetailKey")
+                detailParseAttempts=0
+                stage=4
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                h.postDelayed({step()},900)
+                return
+            }
+            detailParseAttempts=0
+            val updated=JkosTransactionStore.enrich(this,currentDetailKey,detail)
+            if(updated) completedDetailsThisRun++
+            // Successful structured data is already persisted; keep full trees only on failures.

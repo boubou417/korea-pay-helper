@@ -1,0 +1,153 @@
+            val text=n.text?.toString()?.trim().orEmpty()
+            val desc=n.contentDescription?.toString()?.trim().orEmpty()
+            val exact=(text==s || desc==s)
+            val loose=!exact && (text.contains(s) || desc.contains(s))
+            if(exact || loose){
+                val rc=Rect(); n.getBoundsInScreen(rc)
+                val visible=!rc.isEmpty && Rect.intersects(screen,rc) && rc.centerX() in 0..dm.widthPixels && rc.centerY() in 0..dm.heightPixels
+                var score=0
+                if(exact) score+=100 else score+=20
+                if(desc==s) score+=30
+                if(visible) score+=80 else score-=120
+                if(n.isClickable) score+=40
+                if(n.viewIdResourceName?.contains("tab",ignoreCase=true)==true) score+=25
+                if(score>bestScore){ bestScore=score; best=n }
+            }
+            for(i in 0 until n.childCount) walk(n.getChild(i),depth+1)
+        }
+        walk(root,0)
+        return best?.takeIf{bestScore>=0}
+    }
+
+    private fun clickLineNodeOrParent(n:AccessibilityNodeInfo,label:String):String{
+        val dm=resources.displayMetrics
+        val screen=Rect(0,0,dm.widthPixels,dm.heightPixels)
+        var p:AccessibilityNodeInfo?=n
+        var fallback:Rect?=null
+        var fallbackLevel=-1
+        for(level in 0..8){
+            val cur=p ?: break
+            val rc=Rect(); cur.getBoundsInScreen(rc)
+            val onScreen=!rc.isEmpty && Rect.intersects(screen,rc) && rc.centerX() in 0..dm.widthPixels && rc.centerY() in 0..dm.heightPixels
+            log("V2.41 LINE [$label] parent level=$level clickable=${cur.isClickable} bounds=$rc class=${cur.className?:""} id=${cur.viewIdResourceName?:""}")
+            if(onScreen && fallback==null){ fallback=Rect(rc); fallbackLevel=level }
+            if(onScreen && cur.isClickable){
+                if(cur.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return "ACTION_CLICK(level=$level)"
+                fallback=Rect(rc); fallbackLevel=level
+                break
+            }
+            p=cur.parent
+        }
+        val rc=fallback
+        if(rc!=null){
+            val accepted=tapLineNav(rc.exactCenterX(),rc.exactCenterY(),"$label parentLevel=$fallbackLevel bounds=$rc")
+            return if(accepted) "GESTURE(level=$fallbackLevel)" else "FAILED"
+        }
+        log("⚠ V2.41 LINE [$label] 找到 node，但 node/parent 都沒有目前螢幕內可點 bounds")
+        return "FAILED"
+    }
+
+    private fun tapLineNav(x:Float,y:Float,source:String):Boolean{
+        val p=Path(); p.moveTo(x,y)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,90)).build()
+        return dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){
+                log("✓ V2.41 LINE gesture click completed ${x.toInt()},${y.toInt()} source=$source")
+                h.postDelayed({ captureLinePayDiagnostic(null); autoNavigateLinePay() },700)
+            }
+            override fun onCancelled(gd:GestureDescription?){
+                log("⚠ V2.41 LINE gesture click cancelled ${x.toInt()},${y.toInt()} source=$source")
+                h.postDelayed({ autoNavigateLinePay() },700)
+            }
+        },null)
+    }
+
+    private fun clickSelfOrParent(n:AccessibilityNodeInfo):Boolean{
+        var p:AccessibilityNodeInfo?=n
+        repeat(4){
+            if(p?.isClickable==true && p?.performAction(AccessibilityNodeInfo.ACTION_CLICK)==true)return true
+            p=p?.parent
+        }
+        return false
+    }
+    private fun findScrollable(root:AccessibilityNodeInfo):AccessibilityNodeInfo?{
+        if(root.isScrollable)return root
+        for(i in 0 until root.childCount){
+            val x=root.getChild(i)?:continue
+            val r=findScrollable(x); if(r!=null)return r
+        }
+        return null
+    }
+    private fun visibleTexts(root:AccessibilityNodeInfo):List<String>{
+        val out=LinkedHashSet<String>()
+        fun w(n:AccessibilityNodeInfo?,d:Int){
+            if(n==null||d>35||out.size>350)return
+            n.text?.toString()?.trim()?.takeIf{it.isNotEmpty()}?.let{out.add(it)}
+            n.contentDescription?.toString()?.trim()?.takeIf{it.isNotEmpty() && it!="Image"}?.let{out.add(it)}
+            for(i in 0 until n.childCount)w(n.getChild(i),d+1)
+        };w(root,0);return out.toList()
+    }
+    private fun texts(root:AccessibilityNodeInfo)=visibleTexts(root).joinToString("\n")
+    private fun dumpTree(root:AccessibilityNodeInfo, maxNodes:Int=220):String{
+        val sb=StringBuilder();var c=0
+        fun w(n:AccessibilityNodeInfo?,d:Int){
+            if(n==null||c>=maxNodes)return
+            val r=Rect();n.getBoundsInScreen(r)
+            sb.append("#").append(c++).append(" d=").append(d)
+              .append(" text=[").append(n.text?:"").append("] desc=[").append(n.contentDescription?:"")
+              .append("] bounds=").append(r).append(" clickable=").append(n.isClickable)
+              .append(" scrollable=").append(n.isScrollable).append(" class=").append(n.className?:"")
+              .append(" id=[").append(n.viewIdResourceName?:"").append("]\n")
+            for(i in 0 until n.childCount)w(n.getChild(i),d+1)
+        };w(root,0);return sb.toString()
+    }
+    private fun tap(x:Float,y:Float){
+        val p=Path();p.moveTo(x,y)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,80)).build()
+        dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){log("tap completed ${x.toInt()},${y.toInt()}");h.postDelayed({step()},900)}
+        },null)
+    }
+    private fun tapTransaction(x:Float,y:Float,source:String){
+        val p=Path(); p.moveTo(x,y)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,80)).build()
+        val accepted=dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){
+                log("transaction tap completed ${x.toInt()},${y.toInt()} source=$source")
+                h.postDelayed({step()},650)
+            }
+            override fun onCancelled(gd:GestureDescription?){
+                transactionClickPending=false
+                log("⚠ transaction tap cancelled ${x.toInt()},${y.toInt()} source=$source")
+                h.postDelayed({step()},650)
+            }
+        },null)
+        if(!accepted){
+            transactionClickPending=false
+            log("⚠ dispatchGesture 未接受 transaction tap source=$source")
+            h.postDelayed({step()},650)
+        }
+    }
+
+    private fun swipe(x1:Float,y1:Float,x2:Float,y2:Float){
+        val p=Path();p.moveTo(x1,y1);p.lineTo(x2,y2)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,450)).build()
+        dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){log("swipe completed");h.postDelayed({step()},900)}
+        },null)
+    }
+    private fun finish(){
+        if(!running)return
+        running=false
+        log("=== V2.41 測試結束，返回 V2.41 ===")
+        packageManager.getLaunchIntentForPackage(SELF)?.let{
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP);startActivity(it)
+        }
+    }
+    private fun log(s:String){
+        val p=getSharedPreferences("v241",MODE_PRIVATE)
+        val t=SimpleDateFormat("HH:mm:ss",Locale.getDefault()).format(Date())
+        val old=p.getString("log","")?:""
+        p.edit().putString("log",("[$t] $s\n"+old).take(40000)).apply()
+    }
+}

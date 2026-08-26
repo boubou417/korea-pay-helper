@@ -1,0 +1,191 @@
+                    // We have definitely visited detail and issued BACK. Now the list is a true return.
+                    log("← V2.41 Pi 已返回交易紀錄；完成 key=$piCurrentDetailKey")
+                    piCurrentDetailKey=""; piDetailClickedAt=0L
+                    piDetailOpening=false; piReturnPending=false
+                }
+                piDetailOpening && elapsed < 2600L -> {
+                    // ACTION_CLICK was accepted but Android/Pi still exposes the old RecyclerView for
+                    // a short time. Do not clear the key or click the same row again.
+                    schedulePiFormal(260); return
+                }
+                piDetailOpening -> {
+                    log("⚠ V2.41 Pi 點擊後仍停留交易列表；本次略過 key=$piCurrentDetailKey")
+                    piFailedDetailKeys.add(piCurrentDetailKey)
+                    piCurrentDetailKey=""; piDetailClickedAt=0L; piDetailOpening=false
+                }
+            }
+        }
+        val rows=parsePiRows(root)
+        if(rows.isEmpty()){ log("… V2.41 Pi 交易列表已開啟但目前沒有完整 row"); schedulePiFormal(700); return }
+        val added=PiWalletTransactionStore.merge(this,rows.map{it.tx})
+        piNewThisRun += added
+        piPage++
+        val stored=PiWalletTransactionStore.load(this).associateBy{it.key}
+        val fingerprint=rows.joinToString("||"){it.tx.key}
+        log("✓ V2.41 Pi 列表頁 #$piPage：visible=${rows.size}、新增=$added、總數=${stored.size}")
+
+        // Process the newest visible transaction that is new or needs a detail retry.
+        // Incomplete old Pi records are cooled down for 24h after one attempt so daily
+        // quick sync does not spend time reopening the same legacy rows every run.
+        val pending=rows.firstOrNull{r-> shouldRetryPiDetail(stored[r.tx.key]) && r.tx.key !in piFailedDetailKeys }
+        if(pending!=null){
+            piConsecutiveKnownPages=0
+            piCurrentDetailKey=pending.tx.key; piDetailClickedAt=System.currentTimeMillis()
+            piDetailOpening=true; piReturnPending=false
+            val ok=pending.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            log("→ V2.41 Pi 點擊交易 result=$ok key=${pending.tx.key}")
+            if(!ok){
+                val rc=pending.bounds
+                if(!rc.isEmpty) tapPi(rc.exactCenterX(),rc.exactCenterY(),"transaction ${pending.tx.shop}")
+                else { piCurrentDetailKey=""; piDetailOpening=false; schedulePiFormal(600) }
+            } else schedulePiFormal(700)
+            return
+        }
+
+        val allKnownSettled=rows.all{r-> r.tx.key in piKnownAtStart && !shouldRetryPiDetail(stored[r.tx.key]) }
+        if(allKnownSettled && added==0) piConsecutiveKnownPages++ else piConsecutiveKnownPages=0
+        if(piConsecutiveKnownPages>=2){
+            log("✓ V2.41 Pi 已連續看到 2 個既有且本次無需再補的交易畫面；快速同步提早結束")
+            finishPiSync(); return
+        }
+
+        // Move only forward into slightly older records. Stop if the page no longer changes.
+        val rv=findByViewId(root,"tw.com.pchome.android.pi:id/rv_trans")
+        if(fingerprint==piLastPageFingerprint){
+            log("✓ V2.41 Pi 列表內容未再移動；快速同步結束")
+            finishPiSync(); return
+        }
+        piLastPageFingerprint=fingerprint
+        val moved=rv?.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)==true
+        log("↓ V2.41 Pi 交易列表 scrollForward=$moved")
+        if(!moved){ finishPiSync(); return }
+        schedulePiFormal(900)
+    }
+
+    private fun shouldRetryPiDetail(x:PiWalletTransaction?):Boolean{
+        if(x==null) return true
+        if(x.detailChecked) return false
+        if(x.detailCapturedAt<=0L) return true
+        return System.currentTimeMillis()-x.detailCapturedAt >= 24L*60L*60L*1000L
+    }
+
+    private fun processPiDetail(root:AccessibilityNodeInfo,text:String){
+        if(piCurrentDetailKey.isBlank()){ performGlobalAction(GLOBAL_ACTION_BACK); schedulePiFormal(700); return }
+        piDetailOpening=false
+        val d=parsePiDetail(root,text)
+        if(d==null){
+            if(System.currentTimeMillis()-piDetailClickedAt<4500L){ log("… V2.41 Pi 明細載入中 key=$piCurrentDetailKey"); schedulePiFormal(500); return }
+            log("⚠ V2.41 Pi 明細逾時；保留待補 key=$piCurrentDetailKey")
+            piFailedDetailKeys.add(piCurrentDetailKey)
+            piReturnPending=true
+            performGlobalAction(GLOBAL_ACTION_BACK); schedulePiFormal(800); return
+        }
+
+        val complete=isPiDetailComplete(d)
+        val elapsed=System.currentTimeMillis()-piDetailClickedAt
+        if(!complete && elapsed<2200L){
+            // The payment row is one of the last pieces Pi binds. Give it a little time before
+            // deciding this is the older UI variant with no exposed bank/card nodes.
+            schedulePiFormal(350); return
+        }
+
+        val savedComplete=PiWalletTransactionStore.updateDetail(this,piCurrentDetailKey,d)
+        if(savedComplete) {
+            piDetailsThisRun++
+            log("✓ V2.41 Pi 明細解析 key=$piCurrentDetailKey payment=${d.paymentMethod} bank=${d.bank} card=${d.cardLast4} tx=${d.transactionId}")
+        } else {
+            piFailedDetailKeys.add(piCurrentDetailKey)
+            capturePiIncompleteDetail(root,text,piCurrentDetailKey)
+            log("⚠ V2.41 Pi 明細已取得交易資訊，但信用卡銀行/末四碼未完整；保持待補 key=$piCurrentDetailKey payment=${d.paymentMethod} bank=${d.bank} card=${d.cardLast4}")
+        }
+        piReturnPending=true
+        performGlobalAction(GLOBAL_ACTION_BACK)
+        schedulePiFormal(800)
+    }
+
+    private fun isPiDetailComplete(d:PiWalletDetail):Boolean{
+        if(d.transactionId.isBlank() && d.paymentTime.isBlank()) return false
+        val cardLike=d.paymentMethod.contains("信用卡") || d.cardLast4.isNotBlank()
+        return if(cardLike) d.bank.isNotBlank() && Regex("^\\d{4}$").matches(d.cardLast4)
+        else d.paymentMethod.isNotBlank()
+    }
+
+    private fun parsePiDetail(root:AccessibilityNodeInfo,text:String):PiWalletDetail?{
+        val a=text.lineSequence().map{it.trim()}.filter{it.isNotBlank()}.toList()
+        fun after(label:String):String{
+            val i=a.indexOfFirst{it==label}; return if(i>=0 && i+1<a.size) a[i+1] else ""
+        }
+        val amount=run{
+            val i=a.indexOfFirst{it=="交易明細"}
+            if(i>=0){
+                val dollar=a.drop(i+1).indexOfFirst{it=="$"}
+                if(dollar>=0){ val j=i+1+dollar; a.getOrNull(j+1).orEmpty() } else ""
+            } else ""
+        }.replace(",","")
+        val tx=after("交易編號")
+        val shop=after("繳費對象")
+        val payTime=after("付款時間")
+        val complete=after("完成時間")
+        val status=after("狀態")
+        val type=after("交易類型")
+        val note=after("備註")
+
+        // Prefer Pi's stable native view IDs. This avoids treating the generic text
+        // "信用卡付款" as a bank name on older transaction-detail layouts.
+        val cardNameById=findByViewId(root,"tw.com.pchome.android.pi:id/tv_card_name")?.text?.toString()?.trim().orEmpty()
+        val cardNoById=findByViewId(root,"tw.com.pchome.android.pi:id/iv_card_indicator")?.text?.toString()?.trim().orEmpty()
+        val paymentLabelIndex=a.indexOfFirst{it=="付款方式"}
+        val paymentSection=if(paymentLabelIndex>=0){
+            val stopLabels=setOf("交易類型","備註","筆記","離開")
+            a.drop(paymentLabelIndex+1).takeWhile{it !in stopLabels}.take(8)
+        } else emptyList()
+
+        fun cleanBank(v:String):String{
+            val x=v.trim()
+            if(x.isBlank()) return ""
+            val generic=setOf("信用卡付款","信用卡","付款","付款方式","刷卡","信用卡支付")
+            if(x in generic || Regex("^\\d{4}$").matches(x)) return ""
+            return x
+        }
+        val last4=(cardNoById.takeIf{Regex("^\\d{4}$").matches(it)}
+            ?: paymentSection.firstOrNull{Regex("^\\d{4}$").matches(it)}).orEmpty()
+        val bank=cleanBank(cardNameById).ifBlank {
+            paymentSection.asSequence().map{cleanBank(it)}.firstOrNull{it.isNotBlank()}.orEmpty()
+        }
+        val rawPayment=paymentSection.firstOrNull().orEmpty()
+        val cardLike=last4.isNotBlank() || cardNameById.isNotBlank() || rawPayment.contains("信用卡") || text.contains("信用卡付款")
+        val method=when{
+            cardLike -> if(bank.isNotBlank() && last4.isNotBlank()) "信用卡" else "信用卡付款"
+            rawPayment.isNotBlank() -> rawPayment
+            else -> ""
+        }
+        if(tx.isBlank() && payTime.isBlank() && method.isBlank()) return null
+        return PiWalletDetail(
+            transactionId=tx,shop=shop,amount=amount,paymentTime=payTime,completedTime=complete,
+            status=status,paymentMethod=method,
+            paymentAccount=if(bank.isNotBlank()&&last4.isNotBlank()) "$bank [*$last4]" else "",
+            bank=bank,cardLast4=last4,transactionType=type,note=note
+        )
+    }
+
+    private fun capturePiIncompleteDetail(root:AccessibilityNodeInfo,text:String,key:String){
+        if(PiWalletDiagnosticStore.load(this).any{it.eventText=="AUTO_INCOMPLETE:$key"}) return
+        PiWalletDiagnosticStore.add(this,PiWalletDiagnosticCapture(
+            time=System.currentTimeMillis(), packageName=PI_WALLET, eventType=0,
+            eventClass=root.className?.toString().orEmpty(), eventText="AUTO_INCOMPLETE:$key",
+            visibleText=text.take(16000), tree=dumpTree(root,650).take(40000)
+        ))
+    }
+
+    private fun tapPi(x:Float,y:Float,source:String){
+        val p=Path(); p.moveTo(x,y)
+        val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,90)).build()
+        dispatchGesture(g,object:GestureResultCallback(){
+            override fun onCompleted(gd:GestureDescription?){ log("✓ V2.41 Pi gesture completed source=$source"); schedulePiFormal(700) }
+            override fun onCancelled(gd:GestureDescription?){ log("⚠ V2.41 Pi gesture cancelled source=$source"); schedulePiFormal(700) }
+        },null)
+    }
+
+    fun startPiDiagnostic(){
+        if(running || linePayFormalMode || piFormalMode){ log("⚠ 其他支付同步進行中，請完成後再啟動 Pi 拍錢包診斷"); return }
+        piDiagnosticRunning=true
