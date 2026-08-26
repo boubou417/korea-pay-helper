@@ -78,44 +78,59 @@ object GoogleWalletTransactionStore {
         unresolved(c, maxAgeDays).take(limit).joinToString(" || ") { it.fallbackKey }
 
     /**
-     * Merge Wallet history rows while repairing legacy merchant labels that came from
-     * an icon/accessibility label (for example "早") instead of the full merchant name.
-     * A repair is deliberately conservative: same day + same amount, old row unresolved,
-     * old merchant <= 2 characters, and the new Wallet merchant is longer.
+     * V7.6: repair suspicious legacy merchant aliases BEFORE normal duplicate lookup.
      *
-     * V7.5 note: persistence is synchronous so a repaired fallbackKey is immediately
-     * visible to the controller in the same accessibility tick. This prevents a later
-     * load/merge from seeing the pre-repair key and overwriting the migration.
+     * V7.5 only repaired the short alias when no full-key row already existed. If a
+     * previous scan had already created the full merchant row, index was >= 0 and the
+     * unresolved short row (for example "早") survived forever. V7.6 always migrates
+     * every matching unresolved short row first. normalize() then safely coalesces it
+     * with any full-name duplicate.
      */
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
         val current = load(c).toMutableList()
         var added = 0
-        incoming.forEach { x ->
-            var index = current.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
 
-            if (index < 0) {
-                val aliasIndex = current.indexOfFirst { old ->
-                    !old.detailChecked && old.transactionId.isBlank() &&
-                    old.date.substringBefore(' ') == x.date.substringBefore(' ') &&
-                    cleanAmount(old.amount) == cleanAmount(x.amount) &&
+        incoming.forEach { x ->
+            val xDay = x.date.substringBefore(' ')
+            val xAmount = cleanAmount(x.amount)
+
+            // Force merchant migration first, even when a full-name duplicate already exists.
+            for (i in current.indices) {
+                val old = current[i]
+                val aliasMatch = !old.detailChecked && old.transactionId.isBlank() &&
+                    old.date.substringBefore(' ') == xDay &&
+                    amountsEquivalent(old.amount, x.amount) &&
                     isSuspiciousMerchant(old.shop) &&
                     x.shop.trim().length > old.shop.trim().length
-                }
-                if (aliasIndex >= 0) {
-                    val old = current[aliasIndex]
-                    current[aliasIndex] = old.copy(shop = x.shop.trim(), capturedAt = maxOf(old.capturedAt, x.capturedAt))
-                    index = aliasIndex
+                if (aliasMatch) {
+                    current[i] = old.copy(
+                        shop = x.shop.trim(),
+                        amount = canonicalAmount(old.amount, x.amount),
+                        capturedAt = maxOf(old.capturedAt, x.capturedAt)
+                    )
                 }
             }
 
+            // Re-normalize in memory so a migrated alias and an existing full-name row
+            // become one row before we locate/update the incoming transaction.
+            val normalizedNow = normalize(current, false)
+            current.clear()
+            current.addAll(normalizedNow)
+
+            val index = current.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey || sameFallbackIdentity(it, x) }
             if (index < 0) {
                 current.add(x)
                 added++
             } else {
-                current[index] = mergePair(current[index], x, false)
+                val base = current[index]
+                val merged = mergePair(base, x, false).copy(
+                    shop = if (x.shop.trim().length > base.shop.trim().length && isSuspiciousMerchant(base.shop)) x.shop.trim() else base.shop
+                )
+                current[index] = merged
             }
         }
+
         save(c, normalize(current, false))
         return added
     }
@@ -153,7 +168,7 @@ object GoogleWalletTransactionStore {
             val x = if (resetLegacyGlobal && raw.transactionId.isBlank()) raw.copy(
                 cardName = "", bank = "", cardLast4 = "", cardType = "", cardMatchSource = "", detailChecked = false
             ) else raw
-            val index = out.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
+            val index = out.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey || sameFallbackIdentity(it, x) }
             if (index < 0) out.add(x) else out[index] = mergePair(out[index], x, resetLegacyGlobal)
         }
         return out.sortedByDescending { it.date }.take(MAX)
@@ -165,7 +180,15 @@ object GoogleWalletTransactionStore {
         val exactB = b.date.isNotBlank() && !b.date.endsWith(" 12:00:00")
         val preferredDate = when { exactB -> b.date; exactA -> a.date; b.date.isNotBlank() -> b.date; else -> a.date }
         val clearLegacyCard = resetLegacyGlobal || cardConflict
+        val preferredShop = when {
+            isSuspiciousMerchant(a.shop) && b.shop.trim().length > a.shop.trim().length -> b.shop.trim()
+            isSuspiciousMerchant(b.shop) && a.shop.trim().length > b.shop.trim().length -> a.shop.trim()
+            b.shop.isNotBlank() -> b.shop
+            else -> a.shop
+        }
         return a.copy(
+            shop = preferredShop,
+            amount = canonicalAmount(a.amount, b.amount),
             date = preferredDate, capturedAt = maxOf(a.capturedAt, b.capturedAt),
             cardName = if (clearLegacyCard) "" else b.cardName.ifBlank { a.cardName },
             bank = if (clearLegacyCard) "" else b.bank.ifBlank { a.bank },
@@ -178,6 +201,11 @@ object GoogleWalletTransactionStore {
         )
     }
 
+    private fun sameFallbackIdentity(a: GoogleWalletTransaction, b: GoogleWalletTransaction): Boolean =
+        a.date.substringBefore(' ') == b.date.substringBefore(' ') &&
+            amountsEquivalent(a.amount, b.amount) &&
+            a.shop.trim() == b.shop.trim()
+
     private fun isSuspiciousMerchant(shop: String): Boolean {
         val s = shop.trim()
         if (s.isBlank() || s.length > 2) return false
@@ -185,6 +213,21 @@ object GoogleWalletTransactionStore {
     }
 
     private fun cleanAmount(amount: String): String = amount.replace("$", "").replace(",", "").trim()
+
+    private fun amountNumber(amount: String): java.math.BigDecimal? = try {
+        cleanAmount(amount).toBigDecimal().stripTrailingZeros()
+    } catch (_: Throwable) { null }
+
+    private fun amountsEquivalent(a: String, b: String): Boolean {
+        val na = amountNumber(a)
+        val nb = amountNumber(b)
+        return if (na != null && nb != null) na.compareTo(nb) == 0 else cleanAmount(a) == cleanAmount(b)
+    }
+
+    private fun canonicalAmount(a: String, b: String): String {
+        val n = amountNumber(b) ?: amountNumber(a) ?: return b.ifBlank { a }
+        return n.setScale(2).toPlainString()
+    }
 
     private fun parseDayMillis(date: String): Long? = try {
         val f = SimpleDateFormat("yyyy/MM/dd", Locale.US); f.isLenient = false
@@ -199,9 +242,6 @@ object GoogleWalletTransactionStore {
                 .put("transactionId", x.transactionId).put("transactionType", x.transactionType).put("virtualCardLast4", x.virtualCardLast4)
                 .put("virtualCardType", x.virtualCardType).put("cardMatchSource", x.cardMatchSource).put("detailChecked", x.detailChecked))
         }
-        // V7.5: use commit(), not apply(). The controller immediately reloads the store
-        // after merge/updateDetail; asynchronous apply() allowed the old fallbackKey to
-        // survive for the rest of the same sync pass.
         c.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).commit()
     }
 }
