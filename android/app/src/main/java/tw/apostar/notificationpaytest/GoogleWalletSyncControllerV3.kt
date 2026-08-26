@@ -1,19 +1,16 @@
 package tw.apostar.notificationpaytest
 
-/**
- * Compatibility facade kept so the existing Capacitor bridge does not need to
- * change while Google Wallet sync is implemented by the real-UI V6 engine.
- */
+/** Compatibility facade used by the existing Capacitor bridge. */
 object GoogleWalletSyncControllerV3 {
     @JvmStatic
-    fun isRunning(): Boolean = GoogleWalletSyncControllerV6.isRunning()
+    fun isRunning(): Boolean = GoogleWalletSyncControllerV7.isRunning()
 
     @JvmStatic
-    fun start(s: PayAccessibilityService) = GoogleWalletSyncControllerV6.start(s)
+    fun start(s: PayAccessibilityService) = GoogleWalletSyncControllerV7.start(s)
 
     @JvmStatic
-    fun stop(returnToApp: Boolean = true) = GoogleWalletSyncControllerV6.stop(returnToApp)
+    fun stop(returnToApp: Boolean = true) = GoogleWalletSyncControllerV7.stop(returnToApp)
 
     @JvmStatic
-    fun poke() = GoogleWalletSyncControllerV6.poke()
+    fun poke() = GoogleWalletSyncControllerV7.poke()
 }
