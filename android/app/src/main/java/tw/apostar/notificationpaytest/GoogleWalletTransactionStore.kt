@@ -77,14 +77,40 @@ object GoogleWalletTransactionStore {
     fun unresolvedSummary(c: Context, maxAgeDays: Int? = null, limit: Int = 12): String =
         unresolved(c, maxAgeDays).take(limit).joinToString(" || ") { it.fallbackKey }
 
+    /**
+     * Merge Wallet history rows while repairing legacy merchant labels that came from
+     * an icon/accessibility label (for example "早") instead of the full merchant name.
+     * A repair is deliberately conservative: same day + same amount, old row unresolved,
+     * old merchant <= 2 characters, and the new Wallet merchant is longer.
+     */
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
         val current = load(c).toMutableList()
         var added = 0
         incoming.forEach { x ->
-            val index = current.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
-            if (index < 0) { current.add(x); added++ }
-            else current[index] = mergePair(current[index], x, false)
+            var index = current.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
+
+            if (index < 0) {
+                val aliasIndex = current.indexOfFirst { old ->
+                    !old.detailChecked && old.transactionId.isBlank() &&
+                    old.date.substringBefore(' ') == x.date.substringBefore(' ') &&
+                    cleanAmount(old.amount) == cleanAmount(x.amount) &&
+                    isSuspiciousMerchant(old.shop) &&
+                    x.shop.trim().length > old.shop.trim().length
+                }
+                if (aliasIndex >= 0) {
+                    val old = current[aliasIndex]
+                    current[aliasIndex] = old.copy(shop = x.shop.trim(), capturedAt = maxOf(old.capturedAt, x.capturedAt))
+                    index = aliasIndex
+                }
+            }
+
+            if (index < 0) {
+                current.add(x)
+                added++
+            } else {
+                current[index] = mergePair(current[index], x, false)
+            }
         }
         save(c, normalize(current, false))
         return added
@@ -147,6 +173,14 @@ object GoogleWalletTransactionStore {
             detailChecked = if (resetLegacyGlobal && a.transactionId.isBlank() && b.transactionId.isBlank()) false else a.detailChecked || b.detailChecked
         )
     }
+
+    private fun isSuspiciousMerchant(shop: String): Boolean {
+        val s = shop.trim()
+        if (s.isBlank() || s.length > 2) return false
+        return s.none { it.isDigit() } && s !in setOf("全部", "交易", "搜尋", "返回")
+    }
+
+    private fun cleanAmount(amount: String): String = amount.replace("$", "").replace(",", "").trim()
 
     private fun parseDayMillis(date: String): Long? = try {
         val f = SimpleDateFormat("yyyy/MM/dd", Locale.US); f.isLenient = false
