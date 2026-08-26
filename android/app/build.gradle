@@ -24,8 +24,8 @@ android {
         applicationId "com.bou.payhelper"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6019
-        versionName "6.1.1-unified-scheduled-sync-test"
+        versionCode 6020
+        versionName "6.1.2-unified-handoff-test"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions { ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~' }
     }
