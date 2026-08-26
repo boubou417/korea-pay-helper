@@ -59,8 +59,7 @@ object GoogleWalletDiagnosticStore {
 
     @Synchronized
     fun clear(c: Context) {
-        // Use the bridge facade so whichever formal Google Wallet engine is active
-        // (currently V6) starts with a genuinely clean diagnostic buffer.
+        // The facade points to the currently active formal engine (V7).
         if (GoogleWalletSyncControllerV3.isRunning()) {
             c.getSharedPreferences(PREF, 0).edit().clear().commit()
             return
@@ -68,7 +67,8 @@ object GoogleWalletDiagnosticStore {
 
         // Manual diagnostic started after formal sync keeps the formal evidence.
         val formal = load(c).filter {
-            it.eventClass.startsWith("formal-sync-v6/") ||
+            it.eventClass.startsWith("formal-sync-v7/") ||
+                it.eventClass.startsWith("formal-sync-v6/") ||
                 it.eventClass.startsWith("formal-sync-v5/") ||
                 it.eventClass.startsWith("formal-sync-v4/") ||
                 it.eventClass.startsWith("formal-sync-v3/") ||
