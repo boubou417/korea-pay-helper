@@ -17,22 +17,15 @@ data class GoogleWalletDiagnosticCapture(
 object GoogleWalletDiagnosticStore {
     private const val PREF = "google_wallet_diagnostic_captures"
     private const val KEY = "items"
-    private const val MAX = 240
+    private const val MAX = 260
 
     @Synchronized
     fun add(c: Context, x: GoogleWalletDiagnosticCapture) {
         val list = load(c).toMutableList()
         val last = list.firstOrNull()
-        if (last != null &&
-            last.packageName == x.packageName &&
-            last.eventType == x.eventType &&
-            last.eventClass == x.eventClass &&
-            last.eventText == x.eventText &&
-            last.visibleText == x.visibleText &&
-            last.tree == x.tree &&
-            x.time - last.time < 1500
-        ) return
-
+        if (last != null && last.packageName == x.packageName && last.eventType == x.eventType &&
+            last.eventClass == x.eventClass && last.eventText == x.eventText &&
+            last.visibleText == x.visibleText && last.tree == x.tree && x.time - last.time < 1500) return
         list.add(0, x)
         while (list.size > MAX) list.removeAt(list.lastIndex)
         saveSync(c, list)
@@ -43,19 +36,10 @@ object GoogleWalletDiagnosticStore {
         val arr = JSONArray(c.getSharedPreferences(PREF, 0).getString(KEY, "[]") ?: "[]")
         (0 until arr.length()).map { i ->
             val o = arr.getJSONObject(i)
-            GoogleWalletDiagnosticCapture(
-                time = o.optLong("time"),
-                packageName = o.optString("packageName"),
-                eventType = o.optInt("eventType"),
-                eventClass = o.optString("eventClass"),
-                eventText = o.optString("eventText"),
-                visibleText = o.optString("visibleText"),
-                tree = o.optString("tree")
-            )
+            GoogleWalletDiagnosticCapture(o.optLong("time"), o.optString("packageName"), o.optInt("eventType"),
+                o.optString("eventClass"), o.optString("eventText"), o.optString("visibleText"), o.optString("tree"))
         }
-    } catch (_: Exception) {
-        emptyList()
-    }
+    } catch (_: Exception) { emptyList() }
 
     @Synchronized
     fun clear(c: Context) {
@@ -63,36 +47,20 @@ object GoogleWalletDiagnosticStore {
             c.getSharedPreferences(PREF, 0).edit().clear().commit()
             return
         }
-
         val formal = load(c).filter {
-            it.eventClass.startsWith("formal-sync-v71/") ||
-                it.eventClass.startsWith("formal-sync-v7/") ||
-                it.eventClass.startsWith("formal-sync-v6/") ||
-                it.eventClass.startsWith("formal-sync-v5/") ||
-                it.eventClass.startsWith("formal-sync-v4/") ||
-                it.eventClass.startsWith("formal-sync-v3/") ||
-                it.eventClass.startsWith("formal-sync/") ||
-                it.eventType < 0
+            it.eventClass.startsWith("formal-sync-v72/") || it.eventClass.startsWith("formal-sync-v71/") ||
+                it.eventClass.startsWith("formal-sync-v7/") || it.eventClass.startsWith("formal-sync-v6/") ||
+                it.eventClass.startsWith("formal-sync-v5/") || it.eventClass.startsWith("formal-sync-v4/") ||
+                it.eventClass.startsWith("formal-sync-v3/") || it.eventClass.startsWith("formal-sync/") || it.eventType < 0
         }
-        if (formal.isEmpty()) {
-            c.getSharedPreferences(PREF, 0).edit().clear().commit()
-        } else {
-            saveSync(c, formal)
-        }
+        if (formal.isEmpty()) c.getSharedPreferences(PREF, 0).edit().clear().commit() else saveSync(c, formal)
     }
 
     private fun saveSync(c: Context, list: List<GoogleWalletDiagnosticCapture>) {
         val arr = JSONArray()
-        list.take(MAX).forEach { y ->
-            arr.put(JSONObject()
-                .put("time", y.time)
-                .put("packageName", y.packageName)
-                .put("eventType", y.eventType)
-                .put("eventClass", y.eventClass)
-                .put("eventText", y.eventText)
-                .put("visibleText", y.visibleText)
-                .put("tree", y.tree))
-        }
+        list.take(MAX).forEach { y -> arr.put(JSONObject().put("time", y.time).put("packageName", y.packageName)
+            .put("eventType", y.eventType).put("eventClass", y.eventClass).put("eventText", y.eventText)
+            .put("visibleText", y.visibleText).put("tree", y.tree)) }
         c.getSharedPreferences(PREF, 0).edit().putString(KEY, arr.toString()).commit()
     }
 }
