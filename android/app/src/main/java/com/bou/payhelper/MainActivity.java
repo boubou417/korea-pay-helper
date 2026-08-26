@@ -8,5 +8,12 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(AutoCapturePlugin.class);
         super.onCreate(savedInstanceState);
+        NightlySyncReceiver.scheduleNext(this);
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        NightlySyncReceiver.scheduleNext(this);
     }
 }
