@@ -13,11 +13,15 @@ data class GoogleWalletTransaction(
     val bank: String = "",
     val cardLast4: String = "",
     val cardType: String = "",
+    val transactionId: String = "",
+    val transactionType: String = "",
+    val virtualCardLast4: String = "",
+    val virtualCardType: String = "",
+    val cardMatchSource: String = "",
     val detailChecked: Boolean = false
 ) {
-    // Keep the identity stable when a list-only date such as 12:00:00 is later
-    // replaced by the exact time read from the transaction detail screen.
-    val key: String get() = "${date.substringBefore(' ')}|$shop|$amount|$cardLast4"
+    val fallbackKey: String get() = "${date.substringBefore(' ')}|$shop|$amount"
+    val key: String get() = transactionId.ifBlank { fallbackKey }
 }
 
 object GoogleWalletTransactionStore {
@@ -25,7 +29,7 @@ object GoogleWalletTransactionStore {
     private const val KEY = "items"
     private const val MAX = 500
 
-    fun load(c: Context): List<GoogleWalletTransaction> = try {
+    private fun loadRaw(c: Context): List<GoogleWalletTransaction> = try {
         val raw = c.getSharedPreferences(PREF, Context.MODE_PRIVATE).getString(KEY, "[]") ?: "[]"
         val arr = JSONArray(raw)
         (0 until arr.length()).map { i ->
@@ -39,11 +43,32 @@ object GoogleWalletTransactionStore {
                 bank = o.optString("bank"),
                 cardLast4 = o.optString("cardLast4"),
                 cardType = o.optString("cardType"),
+                transactionId = o.optString("transactionId"),
+                transactionType = o.optString("transactionType"),
+                virtualCardLast4 = o.optString("virtualCardLast4"),
+                virtualCardType = o.optString("virtualCardType"),
+                cardMatchSource = o.optString("cardMatchSource"),
                 detailChecked = o.optBoolean("detailChecked", false)
             )
         }
     } catch (_: Exception) {
         emptyList()
+    }
+
+    fun load(c: Context): List<GoogleWalletTransaction> =
+        normalize(loadRaw(c), resetLegacyGlobal = false)
+
+    /**
+     * V6 incorrectly treated Wallet's global Google Pay transaction history as
+     * card-specific and therefore stored the same transaction once per selected
+     * card. V7 runs this once at startup to collapse those rows and remove card
+     * attribution that was inferred only from the selected carousel card.
+     */
+    fun compactLegacyGlobalHistory(c: Context): Int {
+        val raw = loadRaw(c)
+        val normalized = normalize(raw, resetLegacyGlobal = true)
+        save(c, normalized)
+        return (raw.size - normalized.size).coerceAtLeast(0)
     }
 
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
@@ -58,21 +83,7 @@ object GoogleWalletTransactionStore {
                 byKey[x.key] = x
                 added += 1
             } else {
-                byKey[x.key] = old.copy(
-                    // Never overwrite an exact detail timestamp with the list's
-                    // placeholder noon value on a later quick sync.
-                    date = when {
-                        x.detailChecked -> x.date
-                        old.detailChecked -> old.date
-                        else -> old.date.ifBlank { x.date }
-                    },
-                    cardName = x.cardName.ifBlank { old.cardName },
-                    bank = x.bank.ifBlank { old.bank },
-                    cardLast4 = x.cardLast4.ifBlank { old.cardLast4 },
-                    cardType = x.cardType.ifBlank { old.cardType },
-                    detailChecked = old.detailChecked || x.detailChecked,
-                    capturedAt = maxOf(old.capturedAt, x.capturedAt)
-                )
+                byKey[x.key] = mergePair(old, x, resetLegacyGlobal = false)
             }
         }
 
@@ -81,28 +92,111 @@ object GoogleWalletTransactionStore {
         return added
     }
 
-    fun updateDetailTime(c: Context, key: String, exactDateTime: String): Boolean {
-        if (exactDateTime.isBlank()) return false
+    fun updateDetail(
+        c: Context,
+        lookupKey: String,
+        exactDateTime: String,
+        transactionId: String,
+        transactionType: String,
+        virtualCardLast4: String,
+        virtualCardType: String,
+        cardName: String,
+        bank: String,
+        cardLast4: String,
+        cardType: String,
+        cardMatchSource: String
+    ): Boolean {
         val current = load(c).toMutableList()
-        val index = current.indexOfFirst { it.key == key }
+        val index = current.indexOfFirst { it.key == lookupKey || it.fallbackKey == lookupKey }
         if (index < 0) return false
         val old = current[index]
         current[index] = old.copy(
-            date = exactDateTime,
-            detailChecked = true,
+            date = exactDateTime.ifBlank { old.date },
+            transactionId = transactionId.ifBlank { old.transactionId },
+            transactionType = transactionType.ifBlank { old.transactionType },
+            virtualCardLast4 = virtualCardLast4.ifBlank { old.virtualCardLast4 },
+            virtualCardType = virtualCardType.ifBlank { old.virtualCardType },
+            cardName = cardName.ifBlank { old.cardName },
+            bank = bank.ifBlank { old.bank },
+            cardLast4 = cardLast4.ifBlank { old.cardLast4 },
+            cardType = cardType.ifBlank { old.cardType },
+            cardMatchSource = cardMatchSource.ifBlank { old.cardMatchSource },
+            detailChecked = exactDateTime.isNotBlank() || transactionId.isNotBlank(),
             capturedAt = System.currentTimeMillis()
         )
-        current.sortByDescending { it.date }
-        save(c, current)
+        save(c, normalize(current, resetLegacyGlobal = false))
         return true
     }
 
+    fun updateDetailTime(c: Context, key: String, exactDateTime: String): Boolean =
+        updateDetail(c, key, exactDateTime, "", "", "", "", "", "", "", "", "")
+
     fun isDetailChecked(c: Context, key: String): Boolean =
-        load(c).firstOrNull { it.key == key }?.detailChecked == true
+        load(c).firstOrNull { it.key == key || it.fallbackKey == key }?.detailChecked == true
+
+    private fun normalize(
+        input: List<GoogleWalletTransaction>,
+        resetLegacyGlobal: Boolean
+    ): List<GoogleWalletTransaction> {
+        val byKey = LinkedHashMap<String, GoogleWalletTransaction>()
+        input.sortedBy { it.capturedAt }.forEach { raw ->
+            val x = if (resetLegacyGlobal && raw.transactionId.isBlank()) {
+                raw.copy(
+                    cardName = "",
+                    bank = "",
+                    cardLast4 = "",
+                    cardType = "",
+                    cardMatchSource = "",
+                    // Force one V7 detail revisit so Transaction ID can become
+                    // the authoritative identity instead of the legacy card key.
+                    detailChecked = false
+                )
+            } else raw
+            val old = byKey[x.key]
+            byKey[x.key] = if (old == null) x else mergePair(old, x, resetLegacyGlobal)
+        }
+        return byKey.values.sortedByDescending { it.date }.take(MAX)
+    }
+
+    private fun mergePair(
+        a: GoogleWalletTransaction,
+        b: GoogleWalletTransaction,
+        resetLegacyGlobal: Boolean
+    ): GoogleWalletTransaction {
+        val cardConflict = a.cardLast4.isNotBlank() && b.cardLast4.isNotBlank() && a.cardLast4 != b.cardLast4
+        val exactA = a.detailChecked && !a.date.endsWith(" 12:00:00")
+        val exactB = b.detailChecked && !b.date.endsWith(" 12:00:00")
+        val preferredDate = when {
+            exactB -> b.date
+            exactA -> a.date
+            b.date.isNotBlank() -> b.date
+            else -> a.date
+        }
+
+        val clearLegacyCard = resetLegacyGlobal || cardConflict
+        return a.copy(
+            date = preferredDate,
+            capturedAt = maxOf(a.capturedAt, b.capturedAt),
+            cardName = if (clearLegacyCard) "" else b.cardName.ifBlank { a.cardName },
+            bank = if (clearLegacyCard) "" else b.bank.ifBlank { a.bank },
+            cardLast4 = if (clearLegacyCard) "" else b.cardLast4.ifBlank { a.cardLast4 },
+            cardType = if (clearLegacyCard) "" else b.cardType.ifBlank { a.cardType },
+            transactionId = b.transactionId.ifBlank { a.transactionId },
+            transactionType = b.transactionType.ifBlank { a.transactionType },
+            virtualCardLast4 = b.virtualCardLast4.ifBlank { a.virtualCardLast4 },
+            virtualCardType = b.virtualCardType.ifBlank { a.virtualCardType },
+            cardMatchSource = if (clearLegacyCard) "" else b.cardMatchSource.ifBlank { a.cardMatchSource },
+            detailChecked = if (resetLegacyGlobal && a.transactionId.isBlank() && b.transactionId.isBlank()) {
+                false
+            } else {
+                a.detailChecked || b.detailChecked
+            }
+        )
+    }
 
     private fun save(c: Context, list: List<GoogleWalletTransaction>) {
         val arr = JSONArray()
-        list.forEach { x ->
+        list.take(MAX).forEach { x ->
             arr.put(JSONObject()
                 .put("shop", x.shop)
                 .put("amount", x.amount)
@@ -112,6 +206,11 @@ object GoogleWalletTransactionStore {
                 .put("bank", x.bank)
                 .put("cardLast4", x.cardLast4)
                 .put("cardType", x.cardType)
+                .put("transactionId", x.transactionId)
+                .put("transactionType", x.transactionType)
+                .put("virtualCardLast4", x.virtualCardLast4)
+                .put("virtualCardType", x.virtualCardType)
+                .put("cardMatchSource", x.cardMatchSource)
                 .put("detailChecked", x.detailChecked))
         }
         c.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
