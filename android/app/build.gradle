@@ -30,8 +30,8 @@ android {
         applicationId "com.bou.payhelper"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6010
-        versionName "6.0.9-google-wallet-v6"
+        versionCode 6011
+        versionName "6.0.10-google-wallet-v7"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
