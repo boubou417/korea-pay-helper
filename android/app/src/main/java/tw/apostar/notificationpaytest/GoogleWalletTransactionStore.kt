@@ -82,6 +82,10 @@ object GoogleWalletTransactionStore {
      * an icon/accessibility label (for example "早") instead of the full merchant name.
      * A repair is deliberately conservative: same day + same amount, old row unresolved,
      * old merchant <= 2 characters, and the new Wallet merchant is longer.
+     *
+     * V7.5 note: persistence is synchronous so a repaired fallbackKey is immediately
+     * visible to the controller in the same accessibility tick. This prevents a later
+     * load/merge from seeing the pre-repair key and overwriting the migration.
      */
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
@@ -195,6 +199,9 @@ object GoogleWalletTransactionStore {
                 .put("transactionId", x.transactionId).put("transactionType", x.transactionType).put("virtualCardLast4", x.virtualCardLast4)
                 .put("virtualCardType", x.virtualCardType).put("cardMatchSource", x.cardMatchSource).put("detailChecked", x.detailChecked))
         }
-        c.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).apply()
+        // V7.5: use commit(), not apply(). The controller immediately reloads the store
+        // after merge/updateDetail; asynchronous apply() allowed the old fallbackKey to
+        // survive for the rest of the same sync pass.
+        c.getSharedPreferences(PREF, Context.MODE_PRIVATE).edit().putString(KEY, arr.toString()).commit()
     }
 }
