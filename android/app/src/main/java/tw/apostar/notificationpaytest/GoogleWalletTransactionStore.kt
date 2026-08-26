@@ -55,12 +55,11 @@ object GoogleWalletTransactionStore {
         emptyList()
     }
 
-    fun load(c: Context): List<GoogleWalletTransaction> =
-        normalize(loadRaw(c), resetLegacyGlobal = false)
+    fun load(c: Context): List<GoogleWalletTransaction> = normalize(loadRaw(c), false)
 
     fun compactLegacyGlobalHistory(c: Context): Int {
         val raw = loadRaw(c)
-        val normalized = normalize(raw, resetLegacyGlobal = true)
+        val normalized = normalize(raw, true)
         save(c, normalized)
         return (raw.size - normalized.size).coerceAtLeast(0)
     }
@@ -69,23 +68,16 @@ object GoogleWalletTransactionStore {
         if (incoming.isEmpty()) return 0
         val current = load(c).toMutableList()
         var added = 0
-
         incoming.forEach { x ->
-            // Once detail parsing supplies a Transaction ID, later list scans still
-            // only know date/shop/amount. Match on either authoritative key or the
-            // stable fallback identity so the list cannot re-create a duplicate.
-            val index = current.indexOfFirst {
-                it.key == x.key || it.fallbackKey == x.fallbackKey
-            }
+            val index = current.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
             if (index < 0) {
                 current.add(x)
                 added += 1
             } else {
-                current[index] = mergePair(current[index], x, resetLegacyGlobal = false)
+                current[index] = mergePair(current[index], x, false)
             }
         }
-
-        save(c, normalize(current, resetLegacyGlobal = false))
+        save(c, normalize(current, false))
         return added
     }
 
@@ -121,7 +113,7 @@ object GoogleWalletTransactionStore {
             detailChecked = exactDateTime.isNotBlank() || transactionId.isNotBlank(),
             capturedAt = System.currentTimeMillis()
         )
-        save(c, normalize(current, resetLegacyGlobal = false))
+        save(c, normalize(current, false))
         return true
     }
 
@@ -131,10 +123,7 @@ object GoogleWalletTransactionStore {
     fun isDetailChecked(c: Context, key: String): Boolean =
         load(c).firstOrNull { it.key == key || it.fallbackKey == key }?.detailChecked == true
 
-    private fun normalize(
-        input: List<GoogleWalletTransaction>,
-        resetLegacyGlobal: Boolean
-    ): List<GoogleWalletTransaction> {
+    private fun normalize(input: List<GoogleWalletTransaction>, resetLegacyGlobal: Boolean): List<GoogleWalletTransaction> {
         val out = mutableListOf<GoogleWalletTransaction>()
         input.sortedBy { it.capturedAt }.forEach { raw ->
             val x = if (resetLegacyGlobal && raw.transactionId.isBlank()) {
@@ -147,31 +136,24 @@ object GoogleWalletTransactionStore {
                     detailChecked = false
                 )
             } else raw
-
-            val index = out.indexOfFirst {
-                it.key == x.key || it.fallbackKey == x.fallbackKey
-            }
-            if (index < 0) out.add(x)
-            else out[index] = mergePair(out[index], x, resetLegacyGlobal)
+            val index = out.indexOfFirst { it.key == x.key || it.fallbackKey == x.fallbackKey }
+            if (index < 0) out.add(x) else out[index] = mergePair(out[index], x, resetLegacyGlobal)
         }
         return out.sortedByDescending { it.date }.take(MAX)
     }
 
-    private fun mergePair(
-        a: GoogleWalletTransaction,
-        b: GoogleWalletTransaction,
-        resetLegacyGlobal: Boolean
-    ): GoogleWalletTransaction {
+    private fun mergePair(a: GoogleWalletTransaction, b: GoogleWalletTransaction, resetLegacyGlobal: Boolean): GoogleWalletTransaction {
         val cardConflict = a.cardLast4.isNotBlank() && b.cardLast4.isNotBlank() && a.cardLast4 != b.cardLast4
-        val exactA = a.detailChecked && !a.date.endsWith(" 12:00:00")
-        val exactB = b.detailChecked && !b.date.endsWith(" 12:00:00")
+        // Preserve a real HH:mm:ss timestamp even while V7 deliberately resets
+        // legacy detailChecked so it can revisit the row and obtain Transaction ID.
+        val exactA = a.date.isNotBlank() && !a.date.endsWith(" 12:00:00")
+        val exactB = b.date.isNotBlank() && !b.date.endsWith(" 12:00:00")
         val preferredDate = when {
             exactB -> b.date
             exactA -> a.date
             b.date.isNotBlank() -> b.date
             else -> a.date
         }
-
         val clearLegacyCard = resetLegacyGlobal || cardConflict
         return a.copy(
             date = preferredDate,
@@ -185,11 +167,7 @@ object GoogleWalletTransactionStore {
             virtualCardLast4 = b.virtualCardLast4.ifBlank { a.virtualCardLast4 },
             virtualCardType = b.virtualCardType.ifBlank { a.virtualCardType },
             cardMatchSource = if (clearLegacyCard) "" else b.cardMatchSource.ifBlank { a.cardMatchSource },
-            detailChecked = if (resetLegacyGlobal && a.transactionId.isBlank() && b.transactionId.isBlank()) {
-                false
-            } else {
-                a.detailChecked || b.detailChecked
-            }
+            detailChecked = if (resetLegacyGlobal && a.transactionId.isBlank() && b.transactionId.isBlank()) false else a.detailChecked || b.detailChecked
         )
     }
 
