@@ -17,7 +17,7 @@ data class GoogleWalletDiagnosticCapture(
 object GoogleWalletDiagnosticStore {
     private const val PREF = "google_wallet_diagnostic_captures"
     private const val KEY = "items"
-    private const val MAX = 160
+    private const val MAX = 180
 
     @Synchronized
     fun add(c: Context, x: GoogleWalletDiagnosticCapture) {
@@ -59,16 +59,16 @@ object GoogleWalletDiagnosticStore {
 
     @Synchronized
     fun clear(c: Context) {
-        // A formal V4 run must start from a completely clean diagnostic buffer.
-        // Manual diagnostic started later keeps formal captures so debugging evidence
-        // is never erased accidentally.
-        if (GoogleWalletSyncControllerV4.isRunning()) {
+        // Formal V4/V5 runs start with a completely clean diagnostic buffer.
+        if (GoogleWalletSyncControllerV5.isRunning() || GoogleWalletSyncControllerV4.isRunning()) {
             c.getSharedPreferences(PREF, 0).edit().clear().commit()
             return
         }
 
+        // Manual diagnostic started after formal sync keeps the formal evidence.
         val formal = load(c).filter {
-            it.eventClass.startsWith("formal-sync-v4/") ||
+            it.eventClass.startsWith("formal-sync-v5/") ||
+                it.eventClass.startsWith("formal-sync-v4/") ||
                 it.eventClass.startsWith("formal-sync-v3/") ||
                 it.eventClass.startsWith("formal-sync/") ||
                 it.eventType < 0
