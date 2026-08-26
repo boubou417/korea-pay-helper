@@ -58,12 +58,6 @@ object GoogleWalletTransactionStore {
     fun load(c: Context): List<GoogleWalletTransaction> =
         normalize(loadRaw(c), resetLegacyGlobal = false)
 
-    /**
-     * V6 incorrectly treated Wallet's global Google Pay transaction history as
-     * card-specific and therefore stored the same transaction once per selected
-     * card. V7 runs this once at startup to collapse those rows and remove card
-     * attribution that was inferred only from the selected carousel card.
-     */
     fun compactLegacyGlobalHistory(c: Context): Int {
         val raw = loadRaw(c)
         val normalized = normalize(raw, resetLegacyGlobal = true)
@@ -73,22 +67,25 @@ object GoogleWalletTransactionStore {
 
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
-        val byKey = LinkedHashMap<String, GoogleWalletTransaction>()
-        load(c).forEach { byKey[it.key] = it }
+        val current = load(c).toMutableList()
         var added = 0
 
         incoming.forEach { x ->
-            val old = byKey[x.key]
-            if (old == null) {
-                byKey[x.key] = x
+            // Once detail parsing supplies a Transaction ID, later list scans still
+            // only know date/shop/amount. Match on either authoritative key or the
+            // stable fallback identity so the list cannot re-create a duplicate.
+            val index = current.indexOfFirst {
+                it.key == x.key || it.fallbackKey == x.fallbackKey
+            }
+            if (index < 0) {
+                current.add(x)
                 added += 1
             } else {
-                byKey[x.key] = mergePair(old, x, resetLegacyGlobal = false)
+                current[index] = mergePair(current[index], x, resetLegacyGlobal = false)
             }
         }
 
-        val current = byKey.values.sortedByDescending { it.date }.take(MAX)
-        save(c, current)
+        save(c, normalize(current, resetLegacyGlobal = false))
         return added
     }
 
@@ -138,7 +135,7 @@ object GoogleWalletTransactionStore {
         input: List<GoogleWalletTransaction>,
         resetLegacyGlobal: Boolean
     ): List<GoogleWalletTransaction> {
-        val byKey = LinkedHashMap<String, GoogleWalletTransaction>()
+        val out = mutableListOf<GoogleWalletTransaction>()
         input.sortedBy { it.capturedAt }.forEach { raw ->
             val x = if (resetLegacyGlobal && raw.transactionId.isBlank()) {
                 raw.copy(
@@ -147,15 +144,17 @@ object GoogleWalletTransactionStore {
                     cardLast4 = "",
                     cardType = "",
                     cardMatchSource = "",
-                    // Force one V7 detail revisit so Transaction ID can become
-                    // the authoritative identity instead of the legacy card key.
                     detailChecked = false
                 )
             } else raw
-            val old = byKey[x.key]
-            byKey[x.key] = if (old == null) x else mergePair(old, x, resetLegacyGlobal)
+
+            val index = out.indexOfFirst {
+                it.key == x.key || it.fallbackKey == x.fallbackKey
+            }
+            if (index < 0) out.add(x)
+            else out[index] = mergePair(out[index], x, resetLegacyGlobal)
         }
-        return byKey.values.sortedByDescending { it.date }.take(MAX)
+        return out.sortedByDescending { it.date }.take(MAX)
     }
 
     private fun mergePair(
