@@ -2,18 +2,18 @@ package tw.apostar.notificationpaytest
 
 /**
  * Compatibility facade kept so the existing Capacitor bridge does not need to
- * change while Google Wallet sync is implemented by the gesture-only V4 engine.
+ * change while Google Wallet sync is implemented by the dual-package V5 engine.
  */
 object GoogleWalletSyncControllerV3 {
     @JvmStatic
-    fun isRunning(): Boolean = GoogleWalletSyncControllerV4.isRunning()
+    fun isRunning(): Boolean = GoogleWalletSyncControllerV5.isRunning()
 
     @JvmStatic
-    fun start(s: PayAccessibilityService) = GoogleWalletSyncControllerV4.start(s)
+    fun start(s: PayAccessibilityService) = GoogleWalletSyncControllerV5.start(s)
 
     @JvmStatic
-    fun stop(returnToApp: Boolean = true) = GoogleWalletSyncControllerV4.stop(returnToApp)
+    fun stop(returnToApp: Boolean = true) = GoogleWalletSyncControllerV5.stop(returnToApp)
 
     @JvmStatic
-    fun poke() = GoogleWalletSyncControllerV4.poke()
+    fun poke() = GoogleWalletSyncControllerV5.poke()
 }
