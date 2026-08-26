@@ -17,7 +17,7 @@ data class GoogleWalletDiagnosticCapture(
 object GoogleWalletDiagnosticStore {
     private const val PREF = "google_wallet_diagnostic_captures"
     private const val KEY = "items"
-    private const val MAX = 220
+    private const val MAX = 240
 
     @Synchronized
     fun add(c: Context, x: GoogleWalletDiagnosticCapture) {
@@ -59,15 +59,14 @@ object GoogleWalletDiagnosticStore {
 
     @Synchronized
     fun clear(c: Context) {
-        // The facade points to the currently active formal engine (V7).
         if (GoogleWalletSyncControllerV3.isRunning()) {
             c.getSharedPreferences(PREF, 0).edit().clear().commit()
             return
         }
 
-        // Manual diagnostic started after formal sync keeps the formal evidence.
         val formal = load(c).filter {
-            it.eventClass.startsWith("formal-sync-v7/") ||
+            it.eventClass.startsWith("formal-sync-v71/") ||
+                it.eventClass.startsWith("formal-sync-v7/") ||
                 it.eventClass.startsWith("formal-sync-v6/") ||
                 it.eventClass.startsWith("formal-sync-v5/") ||
                 it.eventClass.startsWith("formal-sync-v4/") ||
