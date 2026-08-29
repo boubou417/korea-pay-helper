@@ -7,6 +7,14 @@ const formatPercent = (value) => {
   return `${number.toFixed(2).replace(/\.00$/, '').replace(/(\.\d)0$/, '$1')}%`;
 };
 
+const displayPaymentName = (payment) => {
+  const name = String(payment?.name || '').trim();
+  const bank = String(payment?.bankShortName || payment?.bankName || '').trim();
+  if (!bank || !name) return name;
+  if (name.includes(bank) || bank.includes(name)) return name;
+  return `${bank} ${name}`;
+};
+
 export default function RecommendationCard({ payment, exchangeRate, currencySymbol, darkMode }) {
   if (!payment) {
     return (
@@ -19,8 +27,9 @@ export default function RecommendationCard({ payment, exchangeRate, currencySymb
     );
   }
 
-  const limit = payment.spendLimit || (payment.bonusRate > 0 ? payment.bonusLimit / payment.bonusRate : 0);
-  const remainTwd = Math.max(limit - Number(payment.used || 0), 0);
+  const hasLimit = Number(payment.spendLimit || 0) > 0 || (Number(payment.bonusLimit || 0) > 0 && Number(payment.bonusRate || 0) > 0);
+  const limit = Number(payment.spendLimit || 0) || (Number(payment.bonusRate || 0) > 0 ? Number(payment.bonusLimit || 0) / Number(payment.bonusRate || 0) : 0);
+  const remainTwd = hasLimit ? Math.max(limit - Number(payment.used || 0), 0) : 0;
   const remainLocal = exchangeRate > 0 ? Math.floor(remainTwd / exchangeRate) : 0;
   const totalRate = Number(payment.baseRate || 0) + Number(payment.bonusRate || 0);
 
@@ -29,14 +38,14 @@ export default function RecommendationCard({ payment, exchangeRate, currencySymb
       <SectionHeading icon="⭐" title="今日推薦支付" subtitle="依目前回饋率與剩餘額度排序" />
       <div className="flex items-end justify-between gap-4">
         <div className="min-w-0">
-          <div className="truncate text-xl font-black">{payment.name}</div>
+          <div className="truncate text-xl font-black">{displayPaymentName(payment)}</div>
           <div className="mt-1 text-sm text-blue-100">
             目前最高可用回饋約 {formatPercent(totalRate)}
           </div>
         </div>
         <div className="shrink-0 rounded-2xl bg-white/15 px-3 py-2 text-right backdrop-blur">
-          <div className="text-[11px] text-blue-100">剩餘可刷約</div>
-          <div className="text-lg font-extrabold">{currencySymbol}{remainLocal.toLocaleString()}</div>
+          <div className="text-[11px] text-blue-100">{hasLimit ? '剩餘可刷約' : '回饋額度'}</div>
+          <div className="text-lg font-extrabold">{hasLimit ? `${currencySymbol}${remainLocal.toLocaleString()}` : '無上限'}</div>
         </div>
       </div>
     </SurfaceCard>
