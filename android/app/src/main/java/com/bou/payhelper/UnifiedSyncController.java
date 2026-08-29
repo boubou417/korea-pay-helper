@@ -10,7 +10,7 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import tw.apostar.notificationpaytest.GoogleWalletSyncControllerV3;
 import tw.apostar.notificationpaytest.PayAccessibilityService;
 
-/** V6.1.4 unified payment-history sync with explicit completion handoff. */
+/** V6.1.5 unified payment-history sync with explicit completion handoff. */
 public final class UnifiedSyncController {
     private static final Handler H = new Handler(Looper.getMainLooper());
     private static final Object TOKEN = new Object();
@@ -63,17 +63,29 @@ public final class UnifiedSyncController {
         }
     }
 
-    /** Optional explicit completion hook for collectors that can notify the controller. */
-    public static void collectorFinished(Context context, PayAccessibilityService service, int completedStage){
+    /**
+     * Called by a collector exactly when it finishes. Returning true means the
+     * unified controller accepted the handoff, so that collector must NOT launch
+     * Pay Helper on its own. This avoids Android background-start restrictions
+     * racing against the next payment app.
+     */
+    public static boolean onCollectorFinished(Context context, PayAccessibilityService service, int completedStage){
         synchronized(UnifiedSyncController.class){
-            if(!running || stage!=completedStage) return;
+            if(!running || stage!=completedStage) return false;
         }
+        H.removeCallbacksAndMessages(TOKEN);
         post(250L,()->{
             synchronized(UnifiedSyncController.class){
                 if(!running || stage!=completedStage) return;
             }
             advanceTo(context.getApplicationContext(),service,completedStage+1);
         });
+        return true;
+    }
+
+    /** Backward-compatible hook used by older collector builds. */
+    public static void collectorFinished(Context context, PayAccessibilityService service, int completedStage){
+        onCollectorFinished(context,service,completedStage);
     }
 
     private static void advanceTo(Context context,PayAccessibilityService service,int next){
@@ -84,7 +96,7 @@ public final class UnifiedSyncController {
         }
         if(next>3){ finish(context,service); return; }
         synchronized(UnifiedSyncController.class){ stage=next;stageStartedAt=System.currentTimeMillis(); }
-        post(800L,()->startStage(context,service,next));
+        post(350L,()->startStage(context,service,next));
     }
 
     private static void startStage(Context context,PayAccessibilityService service,int s){
@@ -102,10 +114,6 @@ public final class UnifiedSyncController {
             return;
         }
 
-        // Android 15/16 may let the previous collector's return-to-app activity win
-        // the window race even though the next collector already called startActivity().
-        // Verify the expected payment app is really active. If it is still Pay Helper or
-        // the previous source, explicitly bring the intended app to the foreground.
         post(1_600L,()->ensureStageAppVisible(context,service,s));
         post(4_500L,()->ensureStageAppVisible(context,service,s));
         post(MIN_STAGE_MS,()->pollStage(context,service,s));
