@@ -10,6 +10,14 @@ const formatPercent = (value) => {
 const formatUsagePercent = (value) =>
   Number.isInteger(value) ? String(value) : Number(value).toFixed(1);
 
+const displayPaymentName = (payment) => {
+  const name = String(payment?.name || '').trim();
+  const bank = String(payment?.bankShortName || payment?.bankName || '').trim();
+  if (!bank || !name) return name || bank || '未命名支付方式';
+  if (name.includes(bank) || bank.includes(name)) return name;
+  return `${bank} ${name}`;
+};
+
 export default function PaymentCard({
   payment,
   exchangeRate,
@@ -29,7 +37,7 @@ export default function PaymentCard({
   const spendLimit = Number(payment.spendLimit || 0);
   const bonusLimit = Number(payment.bonusLimit || 0);
   const bonusRate = Number(payment.bonusRate || 0);
-  // 空白/0 代表沒有設定回饋上限；不要用 0 元或虛擬大數字表示。
+  const title = displayPaymentName(payment);
   const hasSpendLimit = spendLimit > 0;
   const hasBonusLimit = bonusLimit > 0 && bonusRate > 0;
   const hasLimit = hasSpendLimit || hasBonusLimit;
@@ -94,7 +102,7 @@ export default function PaymentCard({
               {payment.type === 'card' ? '💳' : '📱'}
             </div>
             <div className="min-w-0">
-              <div className="truncate text-base font-extrabold">{payment.name}</div>
+              <div className="truncate text-base font-extrabold">{title}</div>
               <div className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                 {payment.type === 'card' ? '信用卡' : '行動支付'} · 總回饋約{' '}
                 {formatPercent(
