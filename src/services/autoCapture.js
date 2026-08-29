@@ -61,6 +61,9 @@ const findPaymentMatch = (tx, payments, time) => {
     const exact = candidates.filter(p => digits4(p.cardLast4) === last4);
     if (exact.length === 1) return { rule: exact[0], evidence: 'card-last4' };
     if (exact.length > 1) return { rule: null, evidence: 'ambiguous-last4' };
+    // If Google/LINE/Pi/街口 explicitly reports a last4 that does not exist in
+    // configured cards, do not fall back to bank-only guessing.
+    return { rule: null, evidence: 'unmatched-last4' };
   }
 
   const bank = String(tx.bank || '').trim();
@@ -81,6 +84,62 @@ const txFromHistory = h => ({
   paymentMethod: h.paymentMethod || '',
   cardName: h.cardName || ''
 });
+
+const sameCalendarDay = (a, b) => {
+  const da = new Date(a); const db = new Date(b);
+  if (Number.isNaN(da.getTime()) || Number.isNaN(db.getTime())) return false;
+  return da.getFullYear() === db.getFullYear() && da.getMonth() === db.getMonth() && da.getDate() === db.getDate();
+};
+const amountNumber = value => Math.abs(Number(String(value || '0').replace(/,/g, '')));
+
+// Native stores can enrich a transaction after it was already imported (especially
+// Google Pay: exact time, transaction ID, bank/card name and card last4 are captured
+// from the detail page later). Find that old history row even when native key changed
+// from the fallback identity to a real transaction ID.
+const findExistingAutoRowIndex = (history, tx, key) => {
+  let index = history.findIndex(h => h?.autoCaptureKey === key);
+  if (index >= 0) return index;
+
+  const source = String(tx.source || '');
+  const transactionId = String(tx.transactionId || '').trim();
+  if (transactionId) {
+    index = history.findIndex(h => h?.autoCaptureKey && h.source === source && String(h.transactionId || '').trim() === transactionId);
+    if (index >= 0) return index;
+  }
+
+  const amount = amountNumber(tx.amount);
+  const time = parseCaptureTime(tx.date);
+  return history.findIndex(h =>
+    h?.autoCaptureKey &&
+    h.source === source &&
+    String(h.note || '').trim() === String(tx.shop || '').trim() &&
+    amountNumber(h.amount) === amount &&
+    sameCalendarDay(Number(h.time || 0), time)
+  );
+};
+
+const enrichExistingAutoRow = (row, tx, key) => {
+  const time = parseCaptureTime(tx.date);
+  const nativeHasExactTime = /\s\d{2}:\d{2}/.test(String(tx.date || '')) && !/\s12:00(?::00)?$/.test(String(tx.date || ''));
+  return {
+    ...row,
+    time: nativeHasExactTime ? time : row.time,
+    autoCaptureKey: key || row.autoCaptureKey,
+    paymentMethod: tx.paymentMethod || row.paymentMethod || '',
+    paymentAccount: tx.paymentAccount || row.paymentAccount || '',
+    bank: tx.bank || row.bank || '',
+    cardLast4: tx.cardLast4 || row.cardLast4 || '',
+    cardName: tx.cardName || row.cardName || '',
+    cardType: tx.cardType || row.cardType || '',
+    transactionId: tx.transactionId || row.transactionId || '',
+    transactionType: tx.transactionType || row.transactionType || '',
+    virtualCardLast4: tx.virtualCardLast4 || row.virtualCardLast4 || '',
+    virtualCardType: tx.virtualCardType || row.virtualCardType || '',
+    cardMatchSource: tx.cardMatchSource || row.cardMatchSource || '',
+    detailChecked: Boolean(tx.detailChecked || row.detailChecked),
+    mobileWallet: walletId(tx) || row.mobileWallet || ''
+  };
+};
 
 // Revalidate every auto-captured row using the stricter rule. This repairs old rows
 // that were guessed from "the only wallet candidate" and also recalculates payment
@@ -128,13 +187,24 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
   const settingsMap = readSettingsMap();
   const initialRepair = repairAutoCaptureMatches(historyMap, settingsMap);
   let payments = initialRepair.payments;
-  const known = new Set(historyMap.TW.map(x => x.autoCaptureKey).filter(Boolean));
-  let added = 0, matched = 0, unmatched = 0;
+  let added = 0, matched = 0, unmatched = 0, enriched = 0;
 
   transactions.forEach(tx => {
     const key = tx.key || `${tx.source}|${tx.date}|${tx.shop}|${tx.amount}`;
-    if (!key || known.has(key)) return;
-    const amount = Math.abs(Number(String(tx.amount || '0').replace(/,/g, '')));
+    if (!key) return;
+
+    const existingIndex = findExistingAutoRowIndex(historyMap.TW, tx, key);
+    if (existingIndex >= 0) {
+      const before = historyMap.TW[existingIndex];
+      const after = enrichExistingAutoRow(before, tx, key);
+      if (JSON.stringify(before) !== JSON.stringify(after)) {
+        historyMap.TW[existingIndex] = after;
+        enriched++;
+      }
+      return;
+    }
+
+    const amount = amountNumber(tx.amount);
     if (!Number.isFinite(amount) || amount <= 0 || !tx.shop) return;
     const time = parseCaptureTime(tx.date);
     const { rule, evidence } = findPaymentMatch(tx, payments, time);
@@ -156,7 +226,12 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
       bank: tx.bank || '',
       cardLast4: tx.cardLast4 || '',
       cardName: tx.cardName || '',
+      cardType: tx.cardType || '',
       transactionId: tx.transactionId || '',
+      transactionType: tx.transactionType || '',
+      virtualCardLast4: tx.virtualCardLast4 || '',
+      virtualCardType: tx.virtualCardType || '',
+      cardMatchSource: tx.cardMatchSource || '',
       detailChecked: Boolean(tx.detailChecked),
       mobileWallet: wid,
       matchedPayment: rule?.name || '',
@@ -166,7 +241,6 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
       sharedBonusGroup: rule?.sharedBonusGroup || ''
     });
     if (rule) matched++; else unmatched++;
-    known.add(key);
     added++;
   });
 
@@ -174,7 +248,7 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
   const finalRepair = repairAutoCaptureMatches(historyMap, settingsMap);
   localStorage.setItem('historyMap', JSON.stringify(historyMap));
   localStorage.setItem('settingsMap', JSON.stringify(settingsMap));
-  return { added, total: historyMap.TW.length, matched, unmatched, repaired: initialRepair.repaired + finalRepair.repaired };
+  return { added, total: historyMap.TW.length, matched, unmatched, enriched, repaired: initialRepair.repaired + finalRepair.repaired };
 }
 
 export async function syncCapturedTransactionsNow() {
