@@ -137,11 +137,13 @@
         },null)
     }
 
-    // Unified sync handoff API. Keep the orchestration bridge out of private-field
-    // reflection: these methods operate on the actual AccessibilityService state.
+    // Unified sync handoff API. The AccessibilityService owns the actual app switch:
+    // Android may defer a background startActivity issued by the Pay Helper app process,
+    // while AccessibilityService can perform HOME + launch as part of the automation flow.
     fun isJkoSyncRunningForHandoff():Boolean = running
     fun isLinePaySyncRunningForHandoff():Boolean = linePayFormalMode
     fun isPiSyncRunningForHandoff():Boolean = piFormalMode
+    fun activePackageForUnifiedSync():String = rootInActiveWindow?.packageName?.toString().orEmpty()
 
     fun forceStopPaymentSyncForHandoff(){
         running=false
@@ -159,6 +161,29 @@
         linePayHistoryScrollInFlight=false
         h.removeCallbacksAndMessages(null)
         log("↪ Unified sync handoff：已釋放上一個支付來源的同步狀態")
+    }
+
+    fun startLinePayForUnifiedSync(){
+        forceStopPaymentSyncForHandoff()
+        log("↪ Unified sync：準備切換到 LINE Pay；active=${activePackageForUnifiedSync()}")
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        h.postDelayed({
+            startLinePaySync()
+            h.postDelayed({
+                if(linePayFormalMode){
+                    autoNavigateLinePay()
+                    scheduleLinePayFormal(120)
+                    log("↪ Unified sync：LINE Pay 已啟動並補觸發導覽；active=${activePackageForUnifiedSync()}")
+                }
+            },1400)
+        },450)
+    }
+
+    fun startPiForUnifiedSync(){
+        forceStopPaymentSyncForHandoff()
+        log("↪ Unified sync：準備切換到 Pi；active=${activePackageForUnifiedSync()}")
+        performGlobalAction(GLOBAL_ACTION_HOME)
+        h.postDelayed({ startPiSync() },450)
     }
 
     private fun finish(){
