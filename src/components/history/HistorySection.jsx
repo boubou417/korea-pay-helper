@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 
 const formatLocal = (num, symbol) => `${symbol}${Math.floor(num).toLocaleString()}`;
+const normalize = value => String(value || '').trim().replace(/\s+/g, '').toLowerCase();
 
 function Card({ children, darkMode }) {
   return <div className={darkMode ? 'bg-gray-800 border-gray-700 text-white backdrop-blur rounded-3xl shadow-xl p-4 mb-4 transition-colors' : 'bg-white border-gray-200 backdrop-blur rounded-3xl shadow-xl p-4 mb-4 transition-colors'}>{children}</div>;
@@ -18,9 +19,22 @@ export default function HistorySection({ history, payments, onUndo, currencySymb
     return payments.find(p => p.name === matched) || null;
   };
   const getResetDay = item => Number(getPayment(item)?.resetDay || 0);
+  const displayPaymentName = item => {
+    const payment = getPayment(item);
+    if (!payment) return item?.name || '未命名';
+    const bank = payment.bankShortName || payment.bankName || item?.matchedBank || '';
+    const name = payment.name || item?.name || '';
+    if (!bank || normalize(name).includes(normalize(bank))) return name;
+    return `${bank} ${name}`;
+  };
+  const paymentChannel = item => {
+    if (item?.autoCaptureKey) return item.sourceLabel || item.paymentMethod || '自動擷取';
+    const payment = getPayment(item);
+    if (payment?.type === 'card') return '信用卡';
+    if (payment?.type) return '行動支付';
+    return item?.paymentMethod || '';
+  };
 
-  // Billing cycle is meaningful only when the transaction can be tied to a
-  // configured payment/card that has a statement/reset day.
   const getCycleType = item => {
     const resetDay = getResetDay(item);
     if (!resetDay) return '未判定';
@@ -70,9 +84,9 @@ export default function HistorySection({ history, payments, onUndo, currencySymb
     <div className="flex gap-2 mb-2 flex-wrap">{['全部','本期','上期','未判定','更早'].map(c=><button key={c} onClick={()=>setFilterCycle(c)} className={`px-2 py-1 text-xs rounded-full ${filterCycle===c?'bg-purple-500 text-white':darkMode?'bg-gray-700 text-gray-200':'bg-gray-200 text-gray-700'}`}>{c}</button>)}</div>
     <div className="flex flex-wrap gap-2 mb-3">{allCategories.map(c=><button key={c} onClick={()=>setFilterCategory(c)} className={`px-2 py-1 text-xs rounded-full ${filterCategory===c?'bg-blue-500 text-white':darkMode?'bg-gray-700 text-gray-200':'bg-gray-200 text-gray-700'}`}>{c}</button>)}</div>
     {filteredHistory.length===0&&<div className={`py-8 text-center text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>沒有符合條件的記錄</div>}
-    {list.map(([month,items])=><div key={month} className="mb-3"><div className={`text-sm font-semibold mb-1 ${darkMode?'text-gray-300':'text-gray-700'}`}>📅 {month}</div>{items.map(({item:h,originalIndex})=>{const cycleText=getCycleText(h);const cycleType=getCycleType(h);return <div key={`${h.time}-${originalIndex}`} className={`mb-2 p-3 rounded-xl ${h.name==='現金'?(darkMode?'bg-green-900 text-green-200':'bg-green-50 text-green-800'):(darkMode?'bg-gray-700 text-gray-200':'bg-gray-50 text-gray-800')}`}>
+    {list.map(([month,items])=><div key={month} className="mb-3"><div className={`text-sm font-semibold mb-1 ${darkMode?'text-gray-300':'text-gray-700'}`}>📅 {month}</div>{items.map(({item:h,originalIndex})=>{const cycleText=getCycleText(h);const cycleType=getCycleType(h);const channel=paymentChannel(h);return <div key={`${h.time}-${originalIndex}`} className={`mb-2 p-3 rounded-xl ${h.name==='現金'?(darkMode?'bg-green-900 text-green-200':'bg-green-50 text-green-800'):(darkMode?'bg-gray-700 text-gray-200':'bg-gray-50 text-gray-800')}`}>
       <div className="flex justify-between text-[11px] mb-1"><span className="opacity-70">{new Date(h.time).toLocaleString()}</span><button onClick={()=>onUndo(originalIndex)} className="text-red-500 text-[11px]">刪除</button></div>
-      <div className="flex justify-between gap-3"><div className="min-w-0"><div className="font-medium flex gap-1 flex-wrap">{h.name}<span className={`px-2 py-0.5 rounded-full text-[10px] ${h.name==='現金'?'bg-green-500 text-white':'bg-blue-500 text-white'}`}>{h.category||'未分類'}</span><span className={`px-2 py-0.5 rounded-full text-[10px] ${cycleType==='本期'?'bg-purple-500 text-white':cycleType==='上期'?'bg-indigo-500 text-white':darkMode?'bg-gray-600 text-gray-200':'bg-gray-200 text-gray-600'}`}>{cycleType}</span></div>
+      <div className="flex justify-between gap-3"><div className="min-w-0"><div className="font-medium flex gap-1 flex-wrap items-center"><span>{displayPaymentName(h)}</span>{channel&&<span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500 text-white">{channel}</span>}<span className={`px-2 py-0.5 rounded-full text-[10px] ${h.name==='現金'?'bg-green-500 text-white':'bg-blue-500 text-white'}`}>{h.category||'未分類'}</span><span className={`px-2 py-0.5 rounded-full text-[10px] ${cycleType==='本期'?'bg-purple-500 text-white':cycleType==='上期'?'bg-indigo-500 text-white':darkMode?'bg-gray-600 text-gray-200':'bg-gray-200 text-gray-600'}`}>{cycleType}</span></div>
       {cycleText&&<div className="text-[11px] text-purple-400 mt-0.5">🧾 {cycleText}</div>}{h.note&&<div className={`text-[12px] mt-1 break-words ${darkMode?'text-gray-300':'text-gray-600'}`}>{h.note}</div>}</div><div className="font-semibold text-green-500 shrink-0">{formatLocal(h.amount,currencySymbol)}</div></div></div>;})}</div>)}
     {filteredHistory.length>0&&<div className={`mt-4 pt-3 border-t ${darkMode?'border-gray-700':'border-gray-200'}`}>
       <div className="flex items-center justify-between gap-2"><button onClick={()=>setCurrentPage(p=>Math.max(1,p-1))} disabled={currentPage===1} className={`min-w-[72px] px-3 py-2 rounded-xl text-xs font-medium ${currentPage===1?(darkMode?'bg-gray-800 text-gray-600':'bg-gray-100 text-gray-400'):(darkMode?'bg-gray-700 text-white':'bg-gray-200 text-gray-800')}`}>◀ 上一頁</button>
