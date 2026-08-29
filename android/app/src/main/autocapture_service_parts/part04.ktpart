@@ -1,0 +1,203 @@
+        linePayFormalMode=false
+        linePayDiagnosticRunning=false
+        linePayFormalScheduled=false
+        h.removeCallbacks(linePayFormalRunnable)
+        val all=LinePayTransactionStore.load(this)
+        val pending=all.count{!it.detailChecked}
+        log("=== V2.41 LINE Pay ${if(linePayFullHistoryMode) "完整歷史" else "快速"}同步結束：總數=${all.size}、本次新增=$linePayNewThisRun、本次補明細=$linePayDetailsThisRun、待補=$pending ===")
+        if(returnToApp){
+            packageManager.getLaunchIntentForPackage(SELF)?.let{
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP); startActivity(it)
+            }
+        }
+    }
+
+    private fun autoNavigateLinePay(){
+        if(!linePayDiagnosticRunning) return
+        val now=System.currentTimeMillis()
+        if(now-lineNavLastActionAt < 800L) return
+        val root=rootInActiveWindow ?: return
+        val pkg=root.packageName?.toString().orEmpty()
+        if(pkg!=LINE_APP && pkg!=LINE_PAY) return
+        val text=visibleTexts(root).joinToString("\n")
+
+        if(linePayFormalMode && linePayHistoryEntered && lineNavStage>=3){
+            scheduleLinePayFormal(200)
+            return
+        }
+        if(!linePayFormalMode && (text.contains("付款詳細資訊") || text.lineSequence().firstOrNull()?.trim()=="交易紀錄")){
+            lineNavStage=3
+            return
+        }
+        if(lineNavStage==0 && (text.contains("LINE Pay") || text.contains("LINE PAY")) && !text.contains("錢包分頁")){
+            lineNavStage=1; lineNavAttempts=0
+            log("✓ V2.41 已離開 LINE 主頁並看到 LINE Pay 入口；導頁進入 stage=1")
+        }
+
+        val candidates = when(lineNavStage){
+            0 -> listOf("錢包分頁", "錢包", "Wallet tab", "Wallet")
+            1 -> listOf("LINE Pay", "LINE PAY", "Line Pay")
+            else -> listOf("交易紀錄", "付款紀錄", "交易記錄", "付款記錄", "歷史紀錄", "歷史交易")
+        }
+        var node:AccessibilityNodeInfo?=null; var label=""
+        for(c in candidates){ val n=findBestVisibleExact(root,c); if(n!=null){node=n;label=c;break} }
+        if(node!=null){
+            lineNavAttempts=0; lineNavLastActionAt=now
+            val result=clickLineNodeOrParent(node!!,label)
+            log("→ V2.41 LINE 導頁 stage=$lineNavStage 點擊 [$label] result=$result package=$pkg")
+            captureLinePayDiagnostic(null)
+            if(result!="FAILED"){
+                if(lineNavStage>=2){
+                    linePayHistoryEntered=true
+                    linePayHistoryOpenedAt=System.currentTimeMillis()
+                    linePayHistoryEmptyPolls=0
+                    linePayHistoryLiffSeen=false
+                    linePayHistoryLastCaptureAt=0L
+                    lineNavStage=3
+                    log("✓ V2.41 已點擊 LINE Pay『$label』入口；進入 HISTORY_LOADING，等待 LIFF/WebView 完整交易資料")
+                } else lineNavStage++
+            }
+            h.postDelayed({autoNavigateLinePay(); if(linePayFormalMode)processLinePayFormal()},1100)
+            return
+        }
+        lineNavAttempts++
+        if(lineNavAttempts==1 || lineNavAttempts%5==0){
+            log("… V2.41 LINE 導頁 stage=$lineNavStage 找不到目前螢幕內的 ${candidates.joinToString("/")}；已保存目前 Tree")
+            captureLinePayDiagnostic(null)
+        }
+        if(lineNavAttempts<45) h.postDelayed({autoNavigateLinePay()},900)
+    }
+
+    fun stopLinePayDiagnostic(){
+        if(!linePayDiagnosticRunning){ log("LINE Pay 診斷目前未啟動"); return }
+        captureLinePayDiagnostic(null)
+        linePayDiagnosticRunning=false; linePayFormalMode=false
+        log("=== V2.41 LINE Pay 診斷停止；已保存 ${LinePayDiagnosticStore.load(this).size} 個畫面 ===")
+    }
+
+    private fun captureLinePayDiagnostic(e:AccessibilityEvent?){
+        if(!linePayDiagnosticRunning)return
+        val root=rootInActiveWindow ?: return
+        val pkg=root.packageName?.toString().orEmpty()
+        if(pkg!=LINE_PAY && pkg!=LINE_APP)return
+        val visible=visibleTexts(root).joinToString("\n").take(12000)
+        val tree=dumpTree(root,520).take(30000)
+        val sig="$pkg|$visible|$tree"
+        val now=System.currentTimeMillis()
+        if(sig==lastLinePaySignature && now-lastLinePayCaptureAt<1800L)return
+        lastLinePaySignature=sig; lastLinePayCaptureAt=now
+        LinePayDiagnosticStore.add(this, LinePayDiagnosticCapture(
+            time=now, packageName=pkg,
+            eventType=e?.eventType ?: 0,
+            eventClass=e?.className?.toString().orEmpty(),
+            eventText=e?.text?.joinToString(" | ").orEmpty(),
+            visibleText=visible, tree=tree
+        ))
+        val title=visible.lineSequence().firstOrNull{it.isNotBlank()}.orEmpty().take(50)
+        log("LINE Pay 診斷已保存畫面 #${LinePayDiagnosticStore.load(this).size} package=$pkg title=[$title]")
+    }
+
+    private fun schedulePiFormal(delayMs:Long=220L){
+        if(!piFormalMode || piFormalScheduled) return
+        piFormalScheduled=true
+        h.postDelayed(piFormalRunnable,delayMs)
+    }
+
+    fun startPiSync(){
+        if(running || linePayFormalMode){ log("⚠ 其他支付同步進行中，請完成後再同步 Pi 拍錢包"); return }
+        piFormalMode=true
+        piDiagnosticRunning=false
+        piFormalScheduled=false
+        piNavStage=0; piCurrentDetailKey=""; piDetailClickedAt=0L
+        piDetailOpening=false; piReturnPending=false; piFailedDetailKeys.clear()
+        piNewThisRun=0; piDetailsThisRun=0; piConsecutiveKnownPages=0; piPage=0; piLastPageFingerprint=""
+        val normalized=PiWalletTransactionStore.normalizeInvalidCardDetails(this)
+        if(normalized>0) log("✓ V2.41 Pi 舊資料整理：$normalized 筆『信用卡付款』但缺銀行/末四碼的明細改回待補")
+        piKnownAtStart.clear()
+        val old=PiWalletTransactionStore.load(this)
+        old.forEach{piKnownAtStart.add(it.key)}
+        log("=== V2.41 Pi 拍錢包快速同步開始：既有=${old.size} 筆，待補明細=${old.count{!it.detailChecked}} ===")
+        val launch=packageManager.getLaunchIntentForPackage(PI_WALLET)
+        if(launch==null){ piFormalMode=false; log("⚠ 找不到 Pi 拍錢包 App；package=$PI_WALLET"); return }
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        startActivity(launch)
+        schedulePiFormal(1200)
+        h.postDelayed({
+            if(piFormalMode){
+                log("⚠ V2.41 Pi 拍錢包快速同步達 4 分鐘安全上限；保留目前資料後停止")
+                finishPiSync()
+            }
+        },240000L)
+    }
+
+    private fun finishPiSync(){
+        if(!piFormalMode) return
+        piFormalMode=false; piFormalScheduled=false; h.removeCallbacks(piFormalRunnable)
+        val all=PiWalletTransactionStore.load(this)
+        log("=== V2.41 Pi 拍錢包快速同步結束：總數=${all.size}、本次新增=$piNewThisRun、本次補明細=$piDetailsThisRun、待補=${all.count{!it.detailChecked}} ===")
+        packageManager.getLaunchIntentForPackage(SELF)?.let{
+            it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP); startActivity(it)
+        }
+    }
+
+    private fun processPiFormal(){
+        if(!piFormalMode) return
+        val root=rootInActiveWindow ?: run { schedulePiFormal(500); return }
+        if(root.packageName?.toString()!=PI_WALLET){ schedulePiFormal(500); return }
+        val text=texts(root)
+        when{
+            isPiDetailPage(text) -> processPiDetail(root,text)
+            isPiHistoryPage(root,text) -> processPiHistory(root)
+            else -> navigatePi(root,text)
+        }
+    }
+
+    private fun isPiHistoryPage(root:AccessibilityNodeInfo,text:String):Boolean{
+        if(text.lineSequence().any{it.trim()=="交易紀錄"} && findByViewId(root,"tw.com.pchome.android.pi:id/rv_trans")!=null) return true
+        return root.className?.toString()?.endsWith("TransHistoryActivity")==true
+    }
+
+    private fun isPiDetailPage(text:String):Boolean = text.lineSequence().any{it.trim()=="交易明細"} && text.contains("交易編號")
+
+    private fun navigatePi(root:AccessibilityNodeInfo,text:String){
+        if(text.lineSequence().any{it.trim()=="我的"}){
+            val tx=findByViewId(root,"tw.com.pchome.android.pi:id/stv_trans_history") ?: findExact(root,"交易紀錄")
+            if(tx!=null && clickSelfOrParent(tx)){
+                piNavStage=2; log("→ V2.41 Pi 已點擊『交易紀錄』")
+                schedulePiFormal(900); return
+            }
+        }
+        val my=findByViewId(root,"tw.com.pchome.android.pi:id/navigation_setting") ?: findExact(root,"我的")
+        if(my!=null){
+            val rc=Rect(); my.getBoundsInScreen(rc)
+            val ok=clickSelfOrParent(my)
+            if(ok){ piNavStage=1; log("→ V2.41 Pi 已點擊『我的』"); schedulePiFormal(800); return }
+            if(!rc.isEmpty){ tapPi(rc.exactCenterX(),rc.exactCenterY(),"我的"); return }
+        }
+        log("… V2.41 Pi 導頁中 stage=$piNavStage；尚未找到我的/交易紀錄")
+        schedulePiFormal(700)
+    }
+
+    private fun parsePiRows(root:AccessibilityNodeInfo):List<PiWalletRow>{
+        val rv=findByViewId(root,"tw.com.pchome.android.pi:id/rv_trans") ?: return emptyList()
+        val now=System.currentTimeMillis()
+        val out=ArrayList<PiWalletRow>()
+        for(i in 0 until rv.childCount){
+            val row=rv.getChild(i) ?: continue
+            val title=findByViewId(row,"tw.com.pchome.android.pi:id/tv_title")?.text?.toString()?.trim().orEmpty()
+            val money=findByViewId(row,"tw.com.pchome.android.pi:id/tv_money")?.text?.toString()?.trim().orEmpty()
+            val date=findByViewId(row,"tw.com.pchome.android.pi:id/tv_date")?.text?.toString()?.trim().orEmpty()
+            if(title.isBlank() || money.isBlank() || !Regex("^\\d{4}/\\d{2}/\\d{2}$").matches(date)) continue
+            val amount=money.replace("$","").replace(",","").trim()
+            if(amount.toIntOrNull()==null) continue
+            val rc=Rect(); row.getBoundsInScreen(rc)
+            out.add(PiWalletRow(PiWalletTransaction(title,amount,date,now),row,rc))
+        }
+        return out
+    }
+
+    private fun processPiHistory(root:AccessibilityNodeInfo){
+        if(piCurrentDetailKey.isNotBlank()){
+            val elapsed=System.currentTimeMillis()-piDetailClickedAt
+            when {
+                piReturnPending -> {
