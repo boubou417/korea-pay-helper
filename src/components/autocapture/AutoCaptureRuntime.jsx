@@ -12,8 +12,6 @@ export default function AutoCaptureRuntime(){
     if(!native)return;
     ensureNightlySync().catch(console.warn);
 
-    // After a scheduled run has already imported and reloaded, move from Pay Helper
-    // to the Android launcher. The phone's own screen timeout can then sleep normally.
     if(sessionStorage.getItem(NIGHTLY_HOME_FLAG)==='1'){
       sessionStorage.removeItem(NIGHTLY_HOME_FLAG);
       window.setTimeout(()=>AutoCapture.goDeviceHome().catch(console.warn),700);
@@ -24,17 +22,14 @@ export default function AutoCaptureRuntime(){
       try{
         const status=await AutoCapture.getStatus();
         if(status?.unifiedSyncRunning){wasRunning.current=true;return;}
-
-        // A nightly run can spend almost all of its time with the WebView backgrounded,
-        // so JS may never observe running=true. Native stage=4 is therefore also a
-        // completion signal and guarantees the final import still happens.
         const completed=wasRunning.current || Number(status?.unifiedSyncStage)===4;
         if(!completed)return;
 
         wasRunning.current=false;
         finishing.current=true;
         const scheduled=Boolean(status?.unifiedSyncScheduledRun);
-        await importCapturedTransactions();
+        const merged=await importCapturedTransactions();
+        await AutoCapture.recordImportResult({added:Number(merged?.added||0),matched:Number(merged?.matched||0),unmatched:Number(merged?.unmatched||0)}).catch(console.warn);
         localStorage.setItem('country','TW');
         await AutoCapture.acknowledgeImportedRun();
         if(scheduled)sessionStorage.setItem(NIGHTLY_HOME_FLAG,'1');
