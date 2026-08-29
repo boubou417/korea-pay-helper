@@ -43,6 +43,7 @@ data class PiWalletDetail(
 object PiWalletTransactionStore {
     private const val PREF = "piwallet_structured_transactions"
     private const val KEY = "items"
+    private const val LEGACY_DETAIL_DAYS = 30L
 
     fun load(c: Context): List<PiWalletTransaction> = try {
         val a = JSONArray(c.getSharedPreferences(PREF, 0).getString(KEY, "[]") ?: "[]")
@@ -61,6 +62,13 @@ object PiWalletTransactionStore {
         }
     } catch (_: Exception) { emptyList() }
 
+    private fun isHistorical(dateText:String):Boolean = try {
+        val f=java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.TAIWAN)
+        f.isLenient=false
+        val tx=f.parse(dateText)?.time ?: 0L
+        tx>0L && System.currentTimeMillis()-tx > LEGACY_DETAIL_DAYS*24L*60L*60L*1000L
+    } catch (_:Exception) { false }
+
     fun normalizeInvalidCardDetails(c: Context): Int {
         var changed=0
         val genericBanks=setOf("信用卡付款","信用卡","付款","付款方式","刷卡","信用卡支付")
@@ -68,7 +76,11 @@ object PiWalletTransactionStore {
             val cardLike=x.paymentMethod.contains("信用卡") || x.bank.contains("信用卡") || x.cardLast4.isNotBlank()
             val bankOk=x.bank.isNotBlank() && x.bank !in genericBanks
             val cardOk=Regex("^\\d{4}$").matches(x.cardLast4)
-            if(x.detailChecked && cardLike && (!bankOk || !cardOk)){
+            // Older Pi detail layouts do not expose the bank/card view IDs. Once we
+            // have a real transactionId for a >30-day record, treat that record as
+            // settled instead of resetting detailChecked on every daily sync.
+            val acceptedLegacy=x.transactionId.isNotBlank() && isHistorical(x.date)
+            if(x.detailChecked && cardLike && (!bankOk || !cardOk) && !acceptedLegacy){
                 changed++
                 x.copy(
                     paymentMethod=if(x.paymentMethod.isNotBlank()) x.paymentMethod else "信用卡付款",
@@ -101,11 +113,7 @@ object PiWalletTransactionStore {
         val normalizedLast4=d.cardLast4.trim().takeIf{Regex("^\\d{4}$").matches(it)}.orEmpty()
         val cardLike=d.paymentMethod.contains("信用卡") || d.bank.contains("信用卡") || normalizedLast4.isNotBlank()
         val dateText=key.substringBefore('|')
-        val oldHistorical=try {
-            val f=java.text.SimpleDateFormat("yyyy/MM/dd", java.util.Locale.TAIWAN)
-            val tx=f.parse(dateText)?.time ?: 0L
-            tx>0L && System.currentTimeMillis()-tx > 30L*24L*60L*60L*1000L
-        } catch (_:Exception) { false }
+        val oldHistorical=isHistorical(dateText)
         val complete=d.transactionId.isNotBlank() && if(cardLike) {
             (normalizedBank.isNotBlank() && normalizedLast4.isNotBlank()) || oldHistorical
         } else d.paymentMethod.isNotBlank()
