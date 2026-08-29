@@ -47,26 +47,39 @@ const bankMatches = (txBank, payment) => {
     });
 };
 
-// Wallet membership is only a candidate filter. It is NEVER sufficient evidence to
-// identify a credit card. A rule is accepted only when card last4 or bank identity
-// uniquely identifies one configured payment.
+// Wallet membership only narrows candidates; it never identifies the card by itself.
+// Last4 is strongest evidence. If the user has not configured last4 on any candidate,
+// an explicit bank reported by the wallet may still identify one unique configured card.
 const findPaymentMatch = (tx, payments, time) => {
   const wid = walletId(tx);
   if (!wid) return { rule: null, evidence: '' };
   const candidates = payments.filter(p => Array.isArray(p.mobileWallets) && p.mobileWallets.includes(wid) && ruleActiveAt(p, time));
   if (!candidates.length) return { rule: null, evidence: '' };
 
+  const bank = String(tx.bank || '').trim();
   const last4 = digits4(tx.cardLast4);
   if (last4) {
     const exact = candidates.filter(p => digits4(p.cardLast4) === last4);
     if (exact.length === 1) return { rule: exact[0], evidence: 'card-last4' };
     if (exact.length > 1) return { rule: null, evidence: 'ambiguous-last4' };
-    // If Google/LINE/Pi/街口 explicitly reports a last4 that does not exist in
-    // configured cards, do not fall back to bank-only guessing.
+
+    const candidatesWithConfiguredLast4 = candidates.filter(p => digits4(p.cardLast4));
+    if (candidatesWithConfiguredLast4.length > 0) {
+      return { rule: null, evidence: 'unmatched-last4' };
+    }
+
+    // A wallet can expose a physical-card last4 even when the Pay Helper card entry
+    // has no last4 configured yet. In that case, only allow bank fallback when the
+    // reported bank uniquely identifies one candidate. Multiple cards from the same
+    // bank remain unresolved rather than being guessed.
+    if (bank) {
+      const bankExact = candidates.filter(p => bankMatches(bank, p));
+      if (bankExact.length === 1) return { rule: bankExact[0], evidence: 'bank-unique-no-configured-last4' };
+      if (bankExact.length > 1) return { rule: null, evidence: 'ambiguous-bank' };
+    }
     return { rule: null, evidence: 'unmatched-last4' };
   }
 
-  const bank = String(tx.bank || '').trim();
   if (bank) {
     const exact = candidates.filter(p => bankMatches(bank, p));
     if (exact.length === 1) return { rule: exact[0], evidence: 'bank' };
@@ -92,10 +105,6 @@ const sameCalendarDay = (a, b) => {
 };
 const amountNumber = value => Math.abs(Number(String(value || '0').replace(/,/g, '')));
 
-// Native stores can enrich a transaction after it was already imported (especially
-// Google Pay: exact time, transaction ID, bank/card name and card last4 are captured
-// from the detail page later). Find that old history row even when native key changed
-// from the fallback identity to a real transaction ID.
 const findExistingAutoRowIndex = (history, tx, key) => {
   let index = history.findIndex(h => h?.autoCaptureKey === key);
   if (index >= 0) return index;
@@ -141,9 +150,6 @@ const enrichExistingAutoRow = (row, tx, key) => {
   };
 };
 
-// Revalidate every auto-captured row using the stricter rule. This repairs old rows
-// that were guessed from "the only wallet candidate" and also recalculates payment
-// usage so a wrong card no longer keeps the old amount in its used total.
 const repairAutoCaptureMatches = (historyMap, settingsMap) => {
   const twSettings = settingsMap.TW || { exchangeRate: 1, payments: [] };
   let payments = Array.isArray(twSettings.payments) ? [...twSettings.payments] : [];
