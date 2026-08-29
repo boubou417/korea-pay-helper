@@ -36,6 +36,23 @@ const ruleActiveAt = (p, time) => {
 };
 const digits4 = value => String(value || '').replace(/\D/g, '').slice(-4);
 const normalizeText = value => String(value || '').trim().replace(/\s+/g, '').toLowerCase();
+const inferBankFromText = value => {
+  const t = normalizeText(value);
+  if (!t) return '';
+  if (t.includes('彰化銀行') || t.includes('彰銀')) return '彰銀';
+  if (t.includes('台新')) return '台新';
+  if (t.includes('星展') || t.includes('dbs')) return '星展';
+  if (t.includes('國泰')) return '國泰';
+  if (t.includes('玉山')) return '玉山';
+  if (t.includes('中國信託') || t.includes('中信')) return '中信';
+  if (t.includes('富邦')) return '富邦';
+  if (t.includes('永豐')) return '永豐';
+  if (t.includes('聯邦')) return '聯邦';
+  if (t.includes('兆豐')) return '兆豐';
+  if (t.includes('第一銀行') || t.includes('一銀')) return '一銀';
+  if (t.includes('華南')) return '華南';
+  return '';
+};
 const bankMatches = (txBank, payment) => {
   const bank = normalizeText(txBank);
   if (!bank) return false;
@@ -48,33 +65,29 @@ const bankMatches = (txBank, payment) => {
 };
 
 // Wallet membership only narrows candidates; it never identifies the card by itself.
-// Last4 is strongest evidence. If the user has not configured last4 on any candidate,
-// an explicit bank reported by the wallet may still identify one unique configured card.
+// Last4 is strongest evidence. If a physical last4 is reported but the matching Pay
+// Helper card has no last4 configured, a unique bank match is allowed. A different
+// configured last4 on that same bank/card still blocks the match.
 const findPaymentMatch = (tx, payments, time) => {
   const wid = walletId(tx);
   if (!wid) return { rule: null, evidence: '' };
   const candidates = payments.filter(p => Array.isArray(p.mobileWallets) && p.mobileWallets.includes(wid) && ruleActiveAt(p, time));
   if (!candidates.length) return { rule: null, evidence: '' };
 
-  const bank = String(tx.bank || '').trim();
+  const bank = String(tx.bank || inferBankFromText(tx.cardName) || inferBankFromText(tx.paymentAccount) || '').trim();
   const last4 = digits4(tx.cardLast4);
   if (last4) {
     const exact = candidates.filter(p => digits4(p.cardLast4) === last4);
     if (exact.length === 1) return { rule: exact[0], evidence: 'card-last4' };
     if (exact.length > 1) return { rule: null, evidence: 'ambiguous-last4' };
 
-    const candidatesWithConfiguredLast4 = candidates.filter(p => digits4(p.cardLast4));
-    if (candidatesWithConfiguredLast4.length > 0) {
-      return { rule: null, evidence: 'unmatched-last4' };
-    }
-
-    // A wallet can expose a physical-card last4 even when the Pay Helper card entry
-    // has no last4 configured yet. In that case, only allow bank fallback when the
-    // reported bank uniquely identifies one candidate. Multiple cards from the same
-    // bank remain unresolved rather than being guessed.
     if (bank) {
       const bankExact = candidates.filter(p => bankMatches(bank, p));
-      if (bankExact.length === 1) return { rule: bankExact[0], evidence: 'bank-unique-no-configured-last4' };
+      if (bankExact.length === 1) {
+        const configured = digits4(bankExact[0].cardLast4);
+        if (!configured) return { rule: bankExact[0], evidence: 'bank-unique-card-last4-unconfigured' };
+        return { rule: null, evidence: 'bank-card-last4-conflict' };
+      }
       if (bankExact.length > 1) return { rule: null, evidence: 'ambiguous-bank' };
     }
     return { rule: null, evidence: 'unmatched-last4' };
@@ -91,7 +104,7 @@ const findPaymentMatch = (tx, payments, time) => {
 
 const txFromHistory = h => ({
   source: h.source || '',
-  bank: h.bank || '',
+  bank: h.bank || inferBankFromText(h.cardName) || inferBankFromText(h.paymentAccount) || '',
   cardLast4: h.cardLast4 || '',
   paymentAccount: h.paymentAccount || '',
   paymentMethod: h.paymentMethod || '',
@@ -118,25 +131,34 @@ const findExistingAutoRowIndex = (history, tx, key) => {
 
   const amount = amountNumber(tx.amount);
   const time = parseCaptureTime(tx.date);
-  return history.findIndex(h =>
+  index = history.findIndex(h =>
     h?.autoCaptureKey &&
     h.source === source &&
     String(h.note || '').trim() === String(tx.shop || '').trim() &&
     amountNumber(h.amount) === amount &&
     sameCalendarDay(Number(h.time || 0), time)
   );
+  if (index >= 0) return index;
+
+  // Merchant aliases can change after Google detail repair. Only use the relaxed
+  // source/date/amount identity when it points to exactly one existing row.
+  const relaxed = history.map((h, i) => ({ h, i })).filter(({ h }) =>
+    h?.autoCaptureKey && h.source === source && amountNumber(h.amount) === amount && sameCalendarDay(Number(h.time || 0), time)
+  );
+  return relaxed.length === 1 ? relaxed[0].i : -1;
 };
 
 const enrichExistingAutoRow = (row, tx, key) => {
   const time = parseCaptureTime(tx.date);
   const nativeHasExactTime = /\s\d{2}:\d{2}/.test(String(tx.date || '')) && !/\s12:00(?::00)?$/.test(String(tx.date || ''));
+  const inferredBank = tx.bank || inferBankFromText(tx.cardName) || inferBankFromText(tx.paymentAccount) || row.bank || '';
   return {
     ...row,
     time: nativeHasExactTime ? time : row.time,
     autoCaptureKey: key || row.autoCaptureKey,
     paymentMethod: tx.paymentMethod || row.paymentMethod || '',
     paymentAccount: tx.paymentAccount || row.paymentAccount || '',
-    bank: tx.bank || row.bank || '',
+    bank: inferredBank,
     cardLast4: tx.cardLast4 || row.cardLast4 || '',
     cardName: tx.cardName || row.cardName || '',
     cardType: tx.cardType || row.cardType || '',
@@ -165,9 +187,10 @@ const repairAutoCaptureMatches = (historyMap, settingsMap) => {
     const wantedName = rule?.name || `${sourceLabel} · ${paymentDisplay(tx)}`;
     const wantedMatched = rule?.name || '';
     const wantedBank = rule ? (rule.bankShortName || rule.bankName || '') : '';
-    const changed = h.name !== wantedName || (h.matchedPayment || '') !== wantedMatched || (h.matchedBank || '') !== wantedBank || (h.matchEvidence || '') !== evidence;
+    const nativeBank = h.bank || inferBankFromText(h.cardName) || inferBankFromText(h.paymentAccount) || '';
+    const changed = h.name !== wantedName || (h.matchedPayment || '') !== wantedMatched || (h.matchedBank || '') !== wantedBank || (h.matchEvidence || '') !== evidence || (h.bank || '') !== nativeBank;
     if (changed) repaired++;
-    return { ...h, name: wantedName, matchedPayment: wantedMatched, matchedBank: wantedBank, matchEvidence: evidence };
+    return { ...h, bank: nativeBank, name: wantedName, matchedPayment: wantedMatched, matchedBank: wantedBank, matchEvidence: evidence };
   });
 
   payments = payments.map(p => {
@@ -213,10 +236,11 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
     const amount = amountNumber(tx.amount);
     if (!Number.isFinite(amount) || amount <= 0 || !tx.shop) return;
     const time = parseCaptureTime(tx.date);
-    const { rule, evidence } = findPaymentMatch(tx, payments, time);
+    const normalizedTx = { ...tx, bank: tx.bank || inferBankFromText(tx.cardName) || inferBankFromText(tx.paymentAccount) || '' };
+    const { rule, evidence } = findPaymentMatch(normalizedTx, payments, time);
     const sourceLabel = tx.sourceLabel || tx.source || '自動擷取';
     const wid = walletId(tx);
-    const display = paymentDisplay(tx);
+    const display = paymentDisplay(normalizedTx);
 
     historyMap.TW.push({
       time,
@@ -229,7 +253,7 @@ export function mergeTransactionsIntoTaiwanHistory(transactions = []) {
       autoCaptureKey: key,
       paymentMethod: tx.paymentMethod || '',
       paymentAccount: tx.paymentAccount || '',
-      bank: tx.bank || '',
+      bank: normalizedTx.bank || '',
       cardLast4: tx.cardLast4 || '',
       cardName: tx.cardName || '',
       cardType: tx.cardType || '',
