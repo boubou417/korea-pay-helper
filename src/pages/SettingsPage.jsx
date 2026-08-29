@@ -5,7 +5,7 @@ import AutoCapturePanel from '../components/autocapture/AutoCapturePanel';
 export default function SettingsPage(props) {
   return (
     <>
-      <AutoCapturePanel darkMode={props.darkMode} />
+      <AutoCapturePanel darkMode={props.darkMode} onSyncComplete={props.onAutoSyncComplete} />
       <SettingsCenter {...props} />
     </>
   );
