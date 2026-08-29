@@ -13,11 +13,6 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 
-/**
- * V7.1 keeps the proven V7 global Google Pay flow, but does not stop early while
- * legacy/unresolved store rows still need a detail visit. This lets the sync
- * scroll farther back and fill the remaining Transaction ID / exact time rows.
- */
 object GoogleWalletSyncControllerV71 {
     private const val GOOGLE_WALLET = "com.google.android.apps.walletnfcrel"
     private const val GOOGLE_PLAY_SERVICES = "com.google.android.gms"
@@ -25,535 +20,66 @@ object GoogleWalletSyncControllerV71 {
     private const val MAX_MORE_ATTEMPTS = 5
     private const val MAX_PAGES = 32
     private const val NORMAL_DETAIL_MAX_AGE_DAYS = 60
-
     private const val HOME = 0
     private const val OPEN_MORE = 1
     private const val HISTORY = 2
     private const val DETAIL = 3
 
-    private data class WalletCard(val name: String, val last4: String, val type: String)
-    private data class DetailMeta(
-        val exactDateTime: String,
-        val transactionId: String,
-        val transactionType: String,
-        val virtualCardLast4: String,
-        val virtualCardType: String,
-        val card: WalletCard?,
-        val cardMatchSource: String
-    )
+    private data class WalletCard(val name:String,val last4:String,val type:String)
+    private data class DetailMeta(val exactDateTime:String,val transactionId:String,val transactionType:String,val virtualCardLast4:String,val virtualCardType:String,val card:WalletCard?,val cardMatchSource:String)
+    private val handler=Handler(Looper.getMainLooper()); private var tickScheduled=false; private var service:PayAccessibilityService?=null; private var running=false; private var startedAt=0L; private var state=HOME; private var moreAttempts=0; private var actionStartedAt=0L; private var page=0; private var lastFingerprint=""; private var noMoveCount=0; private var consecutiveKnownPages=0
+    private val knownAtStart=HashSet<String>(); private val unresolvedRemaining=LinkedHashSet<String>(); private val seenThisRun=HashSet<String>(); private val detailVisitedThisRun=HashSet<String>(); private var pendingDetail:GoogleWalletTransaction?=null; private var detailAttempts=0; private var newThisRun=0; private var detailsThisRun=0; private var walletCards:List<WalletCard> = emptyList(); private var lastRateLabel=""; private var lastRateAt=0L; private var lastSurfaceKey=""
+    @JvmStatic fun isRunning():Boolean=running
+    @JvmStatic fun start(s:PayAccessibilityService){if(running)return;service=s;running=true;tickScheduled=false;startedAt=System.currentTimeMillis();state=HOME;moreAttempts=0;actionStartedAt=0L;resetPageState();pendingDetail=null;detailAttempts=0;newThisRun=0;detailsThisRun=0;walletCards=emptyList();lastRateLabel="";lastRateAt=0L;lastSurfaceKey="";seenThisRun.clear();detailVisitedThisRun.clear();val removed=GoogleWalletTransactionStore.compactLegacyGlobalHistory(s);val items=GoogleWalletTransactionStore.load(s);knownAtStart.clear();unresolvedRemaining.clear();items.forEach{knownAtStart.add(it.key);knownAtStart.add(it.fallbackKey);if(!it.detailChecked||it.cardLast4.isBlank())unresolvedRemaining.add(it.fallbackKey)};s.stopGoogleWalletDiagnostic(false);GoogleWalletDiagnosticStore.clear(s);recordSynthetic(s,"v72-start","existing=${items.size} removed=$removed cardUnresolved=${unresolvedRemaining.size}");val launch=s.packageManager.getLaunchIntentForPackage(GOOGLE_WALLET);if(launch==null){finish(true);return};launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);try{s.startActivity(launch)}catch(_:Throwable){};schedule(1200)}
+    @JvmStatic fun stop(returnToApp:Boolean=true)=finish(returnToApp); @JvmStatic fun poke(){if(running)schedule(80)}
+    private val tickRunnable=Runnable{tickScheduled=false;safeTick()};private fun schedule(delay:Long=500L){if(!running||tickScheduled)return;tickScheduled=true;handler.postDelayed(tickRunnable,delay)}
+    private fun safeTick(){val s=service?:return;if(!running)return;try{tick(s)}catch(t:Throwable){recordSynthetic(s,"ERROR-state$state-${t.javaClass.simpleName}",t.message.orEmpty());schedule(700)}}
+    private fun tick(s:PayAccessibilityService){if(System.currentTimeMillis()-startedAt>360000L){finish(true);return};val root=try{s.rootInActiveWindow}catch(_:Throwable){null}?:run{schedule(450);return};val pkg=root.packageName?.toString().orEmpty();val accepted=if(state==DETAIL)pkg==GOOGLE_WALLET||pkg==GOOGLE_PLAY_SERVICES else pkg==GOOGLE_WALLET;if(!accepted){schedule(450);return};val surface="$state|$pkg";if(surface!=lastSurfaceKey){lastSurfaceKey=surface;capture(s,root,"surface-$state")};when(state){HOME->processHome(s,root);OPEN_MORE->processOpenMore(s,root);HISTORY->processHistory(s,root);DETAIL->processDetail(s,root);else->finish(true)}}
+    private fun processHome(s:PayAccessibilityService,root:AccessibilityNodeInfo){val cards=findCards(root);if(cards.isEmpty()){schedule(600);return};walletCards=cards;moreAttempts=0;state=OPEN_MORE;actionStartedAt=System.currentTimeMillis();schedule(900);tapText(s,root,"顯示更多","home-more")}
+    private fun processOpenMore(s:PayAccessibilityService,root:AccessibilityNodeInfo){val values=texts(root);val more=findExactText(root,"查看更多交易");val preview=parseRows(root);if(more!=null||(values.any{it=="交易"}&&preview.isNotEmpty())){mergeRows(s,preview);if(more==null){schedule(450);return};state=HISTORY;resetPageState();schedule(900);tapNode(s,more,"more-transactions");return};if(isWalletHome(root,values)){if(System.currentTimeMillis()-actionStartedAt<650L){schedule(300);return};moreAttempts++;if(moreAttempts>MAX_MORE_ATTEMPTS){finish(true);return};actionStartedAt=System.currentTimeMillis();schedule(900);tapText(s,root,"顯示更多","home-more-retry");return};schedule(450)}
+    private fun processHistory(s:PayAccessibilityService,root:AccessibilityNodeInfo){val values=texts(root);if(values.any{it=="查看更多交易"}&&values.none{it=="交易記錄"}){findExactText(root,"查看更多交易")?.let{schedule(850);tapNode(s,it,"more-retry");return}};val rows=parseRows(root);if(rows.isEmpty()){schedule(500);return};val fingerprint=rows.joinToString("|"){it.fallbackKey};var pageNew=0;rows.forEach{if(seenThisRun.add(it.fallbackKey)&&it.fallbackKey !in knownAtStart&&it.key !in knownAtStart)pageNew++};mergeRows(s,rows);newThisRun+=pageNew;val stored=GoogleWalletTransactionStore.load(s).associateBy{it.fallbackKey};val candidate=rows.firstOrNull{tx->val item=stored[tx.fallbackKey];tx.fallbackKey !in detailVisitedThisRun&&(item?.detailChecked!=true||item.cardLast4.isBlank())&&(tx.fallbackKey in unresolvedRemaining||isRecent(tx.date))};if(candidate!=null){val node=findRowNode(root,candidate);if(node!=null){pendingDetail=candidate;detailAttempts=0;state=DETAIL;schedule(900);tapNode(s,node,"detail-${safe(candidate.shop)}");return};detailVisitedThisRun.add(candidate.fallbackKey)};val allKnown=rows.all{it.fallbackKey in knownAtStart||it.key in knownAtStart};consecutiveKnownPages=if(allKnown)consecutiveKnownPages+1 else 0;noMoveCount=if(fingerprint==lastFingerprint)noMoveCount+1 else 0;lastFingerprint=fingerprint;val canStop=unresolvedRemaining.isEmpty()&&consecutiveKnownPages>=2;if(canStop||noMoveCount>=2||page>=MAX_PAGES){finish(true);return};page++;schedule(900);swipeUp(s,"history-$page")}
+    private fun processDetail(s:PayAccessibilityService,root:AccessibilityNodeInfo){val tx=pendingDetail?:run{state=HISTORY;schedule(450);return};val values=texts(root);val meta=extractDetailMeta(root,tx,values);if(meta.exactDateTime.isNotBlank()||meta.transactionId.isNotBlank()){val card=meta.card;val ok=GoogleWalletTransactionStore.updateDetail(s,tx.fallbackKey,meta.exactDateTime,meta.transactionId,meta.transactionType,meta.virtualCardLast4,meta.virtualCardType,card?.name.orEmpty(),card?.let{inferBank(it.name)}.orEmpty(),card?.last4.orEmpty(),card?.type.orEmpty(),meta.cardMatchSource);if(ok){detailsThisRun++;if(card?.last4?.length==4)unresolvedRemaining.remove(tx.fallbackKey);recordSynthetic(s,"detail-ok","${tx.shop} card=${card?.name.orEmpty()} *${card?.last4.orEmpty()} source=${meta.cardMatchSource}")};detailVisitedThisRun.add(tx.fallbackKey);pendingDetail=null;detailAttempts=0;state=HISTORY;schedule(900);back(s,"detail-success");return};val stillHistory=values.any{it=="交易記錄"}&&values.any{it==tx.shop};detailAttempts++;if(stillHistory&&(detailAttempts==4||detailAttempts==8)){findRowNode(root,tx)?.let{schedule(800);tapNodeOffset(s,it,if(detailAttempts==4)0.68f else 0.35f,"detail-retry");return}};if(detailAttempts<16){schedule(320);return};detailVisitedThisRun.add(tx.fallbackKey);pendingDetail=null;detailAttempts=0;state=HISTORY;schedule(850);if(!stillHistory)back(s,"detail-failed")}
 
-    private val handler = Handler(Looper.getMainLooper())
-    private var tickScheduled = false
-    private var service: PayAccessibilityService? = null
-    private var running = false
-    private var startedAt = 0L
-    private var state = HOME
-    private var moreAttempts = 0
-    private var actionStartedAt = 0L
-    private var page = 0
-    private var lastFingerprint = ""
-    private var noMoveCount = 0
-    private var consecutiveKnownPages = 0
-
-    private val knownAtStart = HashSet<String>()
-    private val unresolvedRemaining = LinkedHashSet<String>()
-    private val seenThisRun = HashSet<String>()
-    private val detailVisitedThisRun = HashSet<String>()
-    private var pendingDetail: GoogleWalletTransaction? = null
-    private var detailAttempts = 0
-    private var newThisRun = 0
-    private var detailsThisRun = 0
-    private var walletCards: List<WalletCard> = emptyList()
-    private var lastRateLabel = ""
-    private var lastRateAt = 0L
-    private var lastSurfaceKey = ""
-
-    @JvmStatic fun isRunning(): Boolean = running
-
-    @JvmStatic
-    fun start(s: PayAccessibilityService) {
-        if (running) return
-        service = s
-        running = true
-        tickScheduled = false
-        startedAt = System.currentTimeMillis()
-        state = HOME
-        moreAttempts = 0
-        actionStartedAt = 0L
-        resetPageState()
-        pendingDetail = null
-        detailAttempts = 0
-        newThisRun = 0
-        detailsThisRun = 0
-        walletCards = emptyList()
-        lastRateLabel = ""
-        lastRateAt = 0L
-        lastSurfaceKey = ""
-        seenThisRun.clear()
-        detailVisitedThisRun.clear()
-
-        val removed = GoogleWalletTransactionStore.compactLegacyGlobalHistory(s)
-        val items = GoogleWalletTransactionStore.load(s)
-        knownAtStart.clear()
-        unresolvedRemaining.clear()
-        items.forEach {
-            knownAtStart.add(it.key)
-            knownAtStart.add(it.fallbackKey)
-            if (!it.detailChecked) unresolvedRemaining.add(it.fallbackKey)
-        }
-
-        s.stopGoogleWalletDiagnostic(false)
-        GoogleWalletDiagnosticStore.clear(s)
-        recordSynthetic(s, "v71-start", "existing=${items.size} removed=$removed unresolved=${unresolvedRemaining.size}")
-        log(s, "=== Google Wallet V7.1 開始；existing=${items.size} unresolved=${unresolvedRemaining.size} ===")
-
-        val launch = s.packageManager.getLaunchIntentForPackage(GOOGLE_WALLET)
-        if (launch == null) {
-            recordSynthetic(s, "v71-launch-missing", "Google Wallet package not found")
-            finish(true)
-            return
-        }
-        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        try { s.startActivity(launch) }
-        catch (t: Throwable) { recordSynthetic(s, "v71-launch-error", "${t.javaClass.simpleName}:${t.message}") }
-        schedule(1200)
+    private fun extractDetailMeta(root:AccessibilityNodeInfo,tx:GoogleWalletTransaction,values:List<String>):DetailMeta{
+        val exact=extractExactDateTime(tx.date,values).orEmpty();val id=extractTransactionId(root,values);val type=values.firstOrNull{it=="使用手機購買"||it=="線上購物"||it.contains("感應付款")}.orEmpty()
+        var virtualType="";var virtualLast4="";val vr=Regex("(?i)(Mastercard|Visa|JCB)\\s*••\\s*([0-9 ]{4,})");for(v in values){val m=vr.find(v)?:continue;virtualType=normalizeCardType(m.groupValues[1]);virtualLast4=m.groupValues[2].filter{it.isDigit()}.takeLast(4);if(virtualLast4.length==4)break}
+        // Highest priority: the transaction detail itself. Google Pay exposes strings such as
+        // "彰化銀行萬事達鈦金商旅卡 ••0102". This is transaction-specific evidence and is
+        // safer than inferring from the currently selected Wallet card or card network.
+        val detailCard=extractExplicitDetailCard(values)
+        if(detailCard!=null)return DetailMeta(exact,id,type,virtualLast4,virtualType,detailCard,"detail-bank-last4")
+        val compact=values.joinToString(" ").replace(" ","")
+        walletCards.firstOrNull{compact.contains("••${it.last4}")}?.let{return DetailMeta(exact,id,type,virtualLast4,virtualType,it,"explicit-wallet-last4")}
+        // Do not assign a physical card merely because it is the only Mastercard/Visa in Wallet.
+        // Network-only evidence is insufficient for reward/card attribution.
+        return DetailMeta(exact,id,type,virtualLast4,virtualType,null,"")
     }
-
-    @JvmStatic fun stop(returnToApp: Boolean = true) = finish(returnToApp)
-    @JvmStatic fun poke() { if (running) schedule(80) }
-
-    private val tickRunnable = Runnable { tickScheduled = false; safeTick() }
-    private fun schedule(delay: Long = 500L) {
-        if (!running || tickScheduled) return
-        tickScheduled = true
-        handler.postDelayed(tickRunnable, delay)
-    }
-
-    private fun safeTick() {
-        val s = service ?: return
-        if (!running) return
-        try { tick(s) }
-        catch (t: Throwable) {
-            recordSynthetic(s, "ERROR-state$state-${t.javaClass.simpleName}", t.message.orEmpty())
-            log(s, "⚠ V7.1 tick state=$state ${t.javaClass.simpleName}:${t.message}")
-            schedule(700)
-        }
-    }
-
-    private fun tick(s: PayAccessibilityService) {
-        if (System.currentTimeMillis() - startedAt > 360_000L) {
-            recordSynthetic(s, "v71-timeout", "unresolved=${unresolvedRemaining.size}")
-            finish(true)
-            return
-        }
-        val root = try { s.rootInActiveWindow } catch (_: Throwable) { null }
-        if (root == null) { recordRate(s, "v71-wait-root", "root=null"); schedule(450); return }
-        val pkg = root.packageName?.toString().orEmpty()
-        val accepted = if (state == DETAIL) pkg == GOOGLE_WALLET || pkg == GOOGLE_PLAY_SERVICES else pkg == GOOGLE_WALLET
-        if (!accepted) { recordRate(s, "v71-wait-package", "state=$state pkg=$pkg"); schedule(450); return }
-
-        val surface = "$state|$pkg"
-        if (surface != lastSurfaceKey) {
-            lastSurfaceKey = surface
-            capture(s, root, "v71-surface-state$state-${pkg.replace('.', '_')}")
-        }
-        when (state) {
-            HOME -> processHome(s, root)
-            OPEN_MORE -> processOpenMore(s, root)
-            HISTORY -> processHistory(s, root)
-            DETAIL -> processDetail(s, root)
-            else -> finish(true)
-        }
-    }
-
-    private fun processHome(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
-        val cards = findCards(root)
-        if (cards.isEmpty()) { captureRate(s, root, "v71-home-no-cards"); schedule(600); return }
-        walletCards = cards
-        recordSynthetic(s, "v71-home", "selected=${selectedCardLast4(root)} cards=${cards.joinToString(",") { it.last4 }} unresolved=${unresolvedRemaining.size}")
-        moreAttempts = 0
-        state = OPEN_MORE
-        actionStartedAt = System.currentTimeMillis()
-        schedule(900)
-        tapText(s, root, "顯示更多", "home-more")
-    }
-
-    private fun processOpenMore(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
-        val values = texts(root)
-        val more = findExactText(root, "查看更多交易")
-        val preview = parseRows(root)
-        if (more != null || (values.any { it == "交易" } && preview.isNotEmpty())) {
-            mergeRows(s, preview)
-            capture(s, root, "v71-preview-${preview.size}")
-            if (more == null) { schedule(450); return }
-            state = HISTORY
-            resetPageState()
-            schedule(900)
-            tapNode(s, more, "more-transactions")
-            return
-        }
-        if (isWalletHome(root, values)) {
-            if (System.currentTimeMillis() - actionStartedAt < 650L) { schedule(300); return }
-            moreAttempts++
-            if (moreAttempts > MAX_MORE_ATTEMPTS) { recordSynthetic(s, "v71-home-more-failed", "attempts=$moreAttempts"); finish(true); return }
-            actionStartedAt = System.currentTimeMillis()
-            schedule(900)
-            tapText(s, root, "顯示更多", "home-more-retry$moreAttempts")
-            return
-        }
-        captureRate(s, root, "v71-open-more-loading")
-        schedule(450)
-    }
-
-    private fun processHistory(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
-        val values = texts(root)
-        if (values.any { it == "查看更多交易" } && values.none { it == "交易記錄" }) {
-            findExactText(root, "查看更多交易")?.let { schedule(850); tapNode(s, it, "more-transactions-retry"); return }
-        }
-        val rows = parseRows(root)
-        if (rows.isEmpty()) { captureRate(s, root, "v71-history-empty"); schedule(500); return }
-
-        val fingerprint = rows.joinToString("|") { it.fallbackKey }
-        var pageNew = 0
-        rows.forEach { tx ->
-            if (seenThisRun.add(tx.fallbackKey) && tx.fallbackKey !in knownAtStart && tx.key !in knownAtStart) pageNew++
-        }
-        mergeRows(s, rows)
-        newThisRun += pageNew
-
-        val stored = GoogleWalletTransactionStore.load(s).associateBy { it.fallbackKey }
-        val candidate = rows.firstOrNull { tx ->
-            val item = stored[tx.fallbackKey]
-            tx.fallbackKey !in detailVisitedThisRun &&
-                item?.detailChecked != true &&
-                (tx.fallbackKey in unresolvedRemaining || isRecent(tx.date))
-        }
-        if (candidate != null) {
-            val node = findRowNode(root, candidate)
-            capture(s, root, "v71-before-detail-${safe(candidate.shop)}")
-            if (node != null) {
-                pendingDetail = candidate
-                detailAttempts = 0
-                state = DETAIL
-                schedule(900)
-                tapNode(s, node, "detail-${safe(candidate.shop)}")
-                return
-            }
-            detailVisitedThisRun.add(candidate.fallbackKey)
-        }
-
-        val allKnown = rows.all { it.fallbackKey in knownAtStart || it.key in knownAtStart }
-        consecutiveKnownPages = if (allKnown) consecutiveKnownPages + 1 else 0
-        noMoveCount = if (fingerprint == lastFingerprint) noMoveCount + 1 else 0
-        lastFingerprint = fingerprint
-        recordSynthetic(s, "v71-history-page$page", "rows=${rows.size} new=$pageNew knownPages=$consecutiveKnownPages noMove=$noMoveCount unresolved=${unresolvedRemaining.size}")
-
-        // V7.1 key fix: known pages may stop the scan ONLY after all legacy
-        // unresolved rows have been completed. Otherwise keep scrolling older.
-        val canStopOnKnown = unresolvedRemaining.isEmpty() && consecutiveKnownPages >= 2
-        if (canStopOnKnown || noMoveCount >= 2 || page >= MAX_PAGES) {
-            recordSynthetic(s, "v71-stop-history", "knownStop=$canStopOnKnown noMove=$noMoveCount page=$page unresolved=${unresolvedRemaining.size}")
-            finish(true)
-            return
-        }
-        page++
-        schedule(900)
-        swipeUp(s, "history-page$page")
-    }
-
-    private fun processDetail(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
-        val tx = pendingDetail ?: run { state = HISTORY; schedule(450); return }
-        val values = texts(root)
-        if (detailAttempts == 0 || detailAttempts == 4 || detailAttempts == 8 || detailAttempts == 12) {
-            capture(s, root, "v71-detail-${safe(tx.shop)}-try$detailAttempts")
-        }
-        val meta = extractDetailMeta(root, tx, values)
-        if (meta.exactDateTime.isNotBlank() || meta.transactionId.isNotBlank()) {
-            val card = meta.card
-            val ok = GoogleWalletTransactionStore.updateDetail(
-                s, tx.fallbackKey, meta.exactDateTime, meta.transactionId, meta.transactionType,
-                meta.virtualCardLast4, meta.virtualCardType,
-                card?.name.orEmpty(), card?.let { inferBank(it.name) }.orEmpty(),
-                card?.last4.orEmpty(), card?.type.orEmpty(), meta.cardMatchSource
-            )
-            if (ok) {
-                detailsThisRun++
-                unresolvedRemaining.remove(tx.fallbackKey)
-                recordSynthetic(s, "v71-detail-ok", "${tx.shop} -> ${meta.exactDateTime} id=${meta.transactionId} virtual=${meta.virtualCardType}*${meta.virtualCardLast4} wallet=${card?.last4.orEmpty()} unresolved=${unresolvedRemaining.size}")
-            }
-            detailVisitedThisRun.add(tx.fallbackKey)
-            pendingDetail = null
-            detailAttempts = 0
-            state = HISTORY
-            schedule(900)
-            back(s, "detail-success")
-            return
-        }
-
-        val stillHistory = values.any { it == "交易記錄" } && values.any { it == tx.shop }
-        detailAttempts++
-        if (stillHistory && (detailAttempts == 4 || detailAttempts == 8)) {
-            findRowNode(root, tx)?.let {
-                schedule(800)
-                tapNodeOffset(s, it, if (detailAttempts == 4) 0.68f else 0.35f, "detail-retry-${safe(tx.shop)}")
-                return
-            }
-        }
-        if (detailAttempts < 16) { schedule(320); return }
-        recordSynthetic(s, "v71-detail-failed", "${tx.fallbackKey} unresolved=${unresolvedRemaining.size}")
-        detailVisitedThisRun.add(tx.fallbackKey)
-        pendingDetail = null
-        detailAttempts = 0
-        state = HISTORY
-        schedule(850)
-        if (!stillHistory) back(s, "detail-failed")
-    }
-
-    private fun extractDetailMeta(root: AccessibilityNodeInfo, tx: GoogleWalletTransaction, values: List<String>): DetailMeta {
-        val exact = extractExactDateTime(tx.date, values).orEmpty()
-        val id = extractTransactionId(root, values)
-        val type = values.firstOrNull { it == "使用手機購買" || it == "線上購物" || it.contains("感應付款") }.orEmpty()
-        var virtualType = ""
-        var virtualLast4 = ""
-        val vr = Regex("(?i)(Mastercard|Visa|JCB)\\s*••\\s*([0-9 ]{4,})")
-        for (v in values) {
-            val m = vr.find(v) ?: continue
-            virtualType = normalizeCardType(m.groupValues[1])
-            virtualLast4 = m.groupValues[2].filter { it.isDigit() }.takeLast(4)
-            if (virtualLast4.length == 4) break
-        }
-        val compact = values.joinToString(" ").replace(" ", "")
-        walletCards.firstOrNull { compact.contains("••${it.last4}") }?.let {
-            return DetailMeta(exact, id, type, virtualLast4, virtualType, it, "explicit-wallet-last4")
-        }
-        if (virtualType.isNotBlank()) {
-            val same = walletCards.filter { normalizeCardType(it.type) == virtualType }
-            if (same.size == 1) return DetailMeta(exact, id, type, virtualLast4, virtualType, same.first(), "unique-card-type")
-        }
-        return DetailMeta(exact, id, type, virtualLast4, virtualType, null, "")
-    }
-
-    private fun extractTransactionId(root: AccessibilityNodeInfo, values: List<String>): String {
-        try {
-            val nodes = root.findAccessibilityNodeInfosByViewId("$GOOGLE_PLAY_SERVICES:id/UserVisibleTransactionId")
-            nodes?.firstOrNull()?.text?.toString()?.trim()?.takeIf { it.isNotBlank() }?.let { return it }
-        } catch (_: Throwable) { }
-        val i = values.indexOfFirst { it == "交易 ID" || it.equals("Transaction ID", true) }
-        return if (i >= 0 && i + 1 < values.size) values[i + 1].trim() else ""
-    }
-
-    private fun parseRows(root: AccessibilityNodeInfo): List<GoogleWalletTransaction> {
-        val out = LinkedHashMap<String, GoogleWalletTransaction>()
-        val dr = Regex("^\\d{1,2}月\\d{1,2}日$")
-        val ar = Regex("^\\$[0-9,]+(?:\\.[0-9]{2})?$")
-        val controls = setOf("交易", "交易記錄", "查看更多交易", "全部", "Google Pay", "Google Pay", "搜尋", "返回", "在錢包中搜尋", "憑證", "會員方案")
-        fun walk(n: AccessibilityNodeInfo?, d: Int) {
-            if (n == null || d > 35) return
-            try {
-                if (n.isClickable) {
-                    val v = texts(n)
-                    val date = v.firstOrNull { dr.matches(it) }
-                    val amount = v.firstOrNull { ar.matches(it) }
-                    if (date != null && amount != null) {
-                        val shop = v.firstOrNull { it.isNotBlank() && !dr.matches(it) && !ar.matches(it) && it !in controls && !it.startsWith("末位數號碼為") && !it.contains("••") }.orEmpty()
-                        if (shop.isNotBlank()) {
-                            val tx = GoogleWalletTransaction(shop, amount.replace("$", "").replace(",", ""), normalizeWalletDate(date), System.currentTimeMillis())
-                            out[tx.fallbackKey] = tx
-                        }
-                    }
-                }
-                for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
-            } catch (_: Throwable) { }
-        }
-        walk(root, 0)
-        return out.values.toList()
-    }
-
-    private fun findRowNode(root: AccessibilityNodeInfo, tx: GoogleWalletTransaction): AccessibilityNodeInfo? {
-        val p = tx.date.substringBefore(' ').split('/')
-        val dl = if (p.size >= 3) "${p[1].toIntOrNull() ?: 0}月${p[2].toIntOrNull() ?: 0}日" else ""
-        var found: AccessibilityNodeInfo? = null
-        fun walk(n: AccessibilityNodeInfo?, d: Int) {
-            if (n == null || d > 35 || found != null) return
-            try {
-                if (n.isClickable) {
-                    val v = texts(n)
-                    if (v.any { it == tx.shop } && v.any { it == dl } && v.any { cleanNumeric(it) == cleanNumeric(tx.amount) && cleanNumeric(it).isNotBlank() }) {
-                        found = n; return
-                    }
-                }
-                for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
-            } catch (_: Throwable) { }
-        }
-        walk(root, 0)
-        return found
-    }
-
-    private fun findCards(root: AccessibilityNodeInfo): List<WalletCard> {
-        val nodes = try { root.findAccessibilityNodeInfosByViewId("$GOOGLE_WALLET:id/Card") ?: emptyList() } catch (_: Throwable) { emptyList() }
-        return nodes.mapNotNull { n ->
-            val desc = texts(n).firstOrNull { it.startsWith("末位數號碼為") } ?: return@mapNotNull null
-            val digits = Regex("末位數號碼為\\s*([0-9 ]+)").find(desc)?.groupValues?.getOrNull(1)?.filter { it.isDigit() }.orEmpty()
-            val last4 = digits.takeLast(4); if (last4.length != 4) return@mapNotNull null
-            var name = desc.substringAfter("的 ", desc).removeSuffix("卡片。").removeSuffix("卡片").trim()
-            val type = normalizeCardType(name)
-            if (type in setOf("Mastercard", "Visa", "JCB")) name = name.replace(type, "", true).trim()
-            WalletCard(name, last4, if (type in setOf("Mastercard", "Visa", "JCB")) type else "")
-        }.distinctBy { it.last4 }
-    }
-
-    private fun selectedCardLast4(root: AccessibilityNodeInfo): String {
-        for (v in texts(root)) Regex("••([0-9]{4})").find(v.replace(" ", ""))?.let { return it.groupValues[1] }
-        return ""
-    }
-
-    private fun normalizeWalletDate(text: String): String {
-        val m = Regex("^(\\d{1,2})月(\\d{1,2})日$").find(text) ?: return text
-        val month = m.groupValues[1].toIntOrNull() ?: return text
-        val day = m.groupValues[2].toIntOrNull() ?: return text
-        val now = Calendar.getInstance(); var year = now.get(Calendar.YEAR)
-        if (month > now.get(Calendar.MONTH) + 2) year--
-        return String.format(Locale.US, "%04d/%02d/%02d 12:00:00", year, month, day)
-    }
-
-    private fun extractExactDateTime(originalDate: String, values: List<String>): String? {
-        val r = Regex("(?i)(上午|下午|AM|PM)?\\s*(\\d{1,2})[:：](\\d{2})(?:[:：](\\d{2}))?")
-        for (v in values) {
-            val m = r.find(v) ?: continue
-            val period = m.groupValues[1].uppercase(Locale.US)
-            var h = m.groupValues[2].toIntOrNull() ?: continue
-            val min = m.groupValues[3].toIntOrNull() ?: continue
-            val sec = m.groupValues[4].toIntOrNull() ?: 0
-            if (h !in 0..23 || min !in 0..59 || sec !in 0..59) continue
-            if ((period == "下午" || period == "PM") && h in 1..11) h += 12
-            if ((period == "上午" || period == "AM") && h == 12) h = 0
-            val day = originalDate.substringBefore(' ')
-            if (Regex("^\\d{4}/\\d{2}/\\d{2}$").matches(day)) return String.format(Locale.US, "%s %02d:%02d:%02d", day, h, min, sec)
-        }
+    private fun extractExplicitDetailCard(values:List<String>):WalletCard?{
+        val r=Regex("(.+?)\\s*[•·]{2}\\s*([0-9 ]{4,})$")
+        for(raw in values){val v=raw.trim();val m=r.find(v)?:continue;val last4=m.groupValues[2].filter{it.isDigit()}.takeLast(4);if(last4.length!=4)continue;var name=m.groupValues[1].trim();if(name.equals("Mastercard",true)||name.equals("Visa",true)||name.equals("JCB",true))continue;val type=normalizeCardType(name);return WalletCard(name,last4,if(type in setOf("Mastercard","Visa","JCB"))type else "")}
         return null
     }
-
-    private fun isRecent(date: String): Boolean = try {
-        val f = SimpleDateFormat("yyyy/MM/dd", Locale.US); f.isLenient = false
-        val d = f.parse(date.substringBefore(' '))
-        d != null && System.currentTimeMillis() - d.time <= NORMAL_DETAIL_MAX_AGE_DAYS * 86_400_000L
-    } catch (_: Throwable) { false }
-
-    private fun normalizeCardType(v: String): String = when {
-        v.contains("Mastercard", true) -> "Mastercard"
-        v.contains("Visa", true) -> "Visa"
-        v.contains("JCB", true) -> "JCB"
-        else -> v.trim()
-    }
-    private fun inferBank(n: String): String = when {
-        n.contains("彰化銀行") || n.contains("彰銀") -> "彰銀"
-        n.contains("台新") -> "台新"
-        n.contains("國泰") -> "國泰"
-        n.contains("玉山") -> "玉山"
-        n.contains("中信") || n.contains("中國信託") -> "中信"
-        n.contains("富邦") -> "富邦"
-        n.contains("永豐") -> "永豐"
-        else -> ""
-    }
-
-    private fun texts(root: AccessibilityNodeInfo): List<String> {
-        val out = ArrayList<String>()
-        fun walk(n: AccessibilityNodeInfo?, d: Int) {
-            if (n == null || d > 26 || out.size > 280) return
-            try {
-                n.text?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let { out.add(it) }
-                n.contentDescription?.toString()?.trim()?.takeIf { it.isNotEmpty() && it != "Image" }?.let { out.add(it) }
-                for (i in 0 until n.childCount) walk(n.getChild(i), d + 1)
-            } catch (_: Throwable) { }
-        }
-        walk(root, 0); return out
-    }
-
-    private fun findExactText(root: AccessibilityNodeInfo, target: String): AccessibilityNodeInfo? {
-        try {
-            if (root.text?.toString()?.trim() == target || root.contentDescription?.toString()?.trim() == target) return root
-            for (i in 0 until root.childCount) root.getChild(i)?.let { findExactText(it, target) }?.let { return it }
-        } catch (_: Throwable) { }
-        return null
-    }
-
-    private fun isWalletHome(root: AccessibilityNodeInfo, values: List<String> = texts(root)): Boolean {
-        if (values.any { it == "查看更多交易" } || values.any { it == "交易記錄" }) return false
-        return values.any { it == "付款卡" } && findCards(root).isNotEmpty()
-    }
-
-    private fun tapText(s: PayAccessibilityService, root: AccessibilityNodeInfo, text: String, label: String) {
-        findExactText(root, text)?.let { tapNode(s, it, label) } ?: recordSynthetic(s, "tap-$label-missing", text)
-    }
-    private fun tapNode(s: PayAccessibilityService, node: AccessibilityNodeInfo, label: String) = tapNodeOffset(s, node, 0.5f, label)
-    private fun tapNodeOffset(s: PayAccessibilityService, node: AccessibilityNodeInfo, xf: Float, label: String) {
-        val r = Rect(); try { node.getBoundsInScreen(r) } catch (_: Throwable) { return }
-        if (r.isEmpty) return
-        tapPoint(s, r.left + r.width() * xf.coerceIn(0.15f, 0.85f), r.exactCenterY(), label)
-    }
-    private fun tapPoint(s: PayAccessibilityService, x: Float, y: Float, label: String) {
-        recordSynthetic(s, "tap-$label-dispatch", "x=${x.toInt()} y=${y.toInt()}")
-        try {
-            val p = Path(); p.moveTo(x, y)
-            val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 90)).build()
-            val accepted = s.dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gd: GestureDescription?) { recordSynthetic(s, "tap-$label-completed", "ok"); poke() }
-                override fun onCancelled(gd: GestureDescription?) { recordSynthetic(s, "tap-$label-cancelled", "cancelled"); poke() }
-            }, null)
-            recordSynthetic(s, "tap-$label-accepted", "accepted=$accepted")
-        } catch (t: Throwable) { recordSynthetic(s, "tap-$label-error", t.message.orEmpty()); poke() }
-    }
-    private fun swipeUp(s: PayAccessibilityService, label: String) {
-        val dm = s.resources.displayMetrics; val x = dm.widthPixels / 2f; val y1 = dm.heightPixels * .78f; val y2 = dm.heightPixels * .30f
-        try {
-            val p = Path(); p.moveTo(x, y1); p.lineTo(x, y2)
-            val g = GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p, 0, 420)).build()
-            s.dispatchGesture(g, object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gd: GestureDescription?) { poke() }
-                override fun onCancelled(gd: GestureDescription?) { poke() }
-            }, null)
-            recordSynthetic(s, "swipe-$label", "from=${y1.toInt()} to=${y2.toInt()}")
-        } catch (t: Throwable) { recordSynthetic(s, "swipe-$label-error", t.message.orEmpty()); poke() }
-    }
-    private fun back(s: PayAccessibilityService, label: String) {
-        recordSynthetic(s, "back-$label", "dispatch")
-        try { s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK) } catch (_: Throwable) { }
-    }
-
-    private fun mergeRows(s: PayAccessibilityService, rows: List<GoogleWalletTransaction>) { if (rows.isNotEmpty()) GoogleWalletTransactionStore.merge(s, rows) }
-    private fun cleanNumeric(v: String): String = v.replace(Regex("[^0-9.]"), "").trimStart('0')
-    private fun safe(v: String): String = v.replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]"), "_").take(24)
-    private fun resetPageState() { page = 0; lastFingerprint = ""; noMoveCount = 0; consecutiveKnownPages = 0 }
-
-    private fun captureRate(s: PayAccessibilityService, root: AccessibilityNodeInfo, label: String) {
-        val now = System.currentTimeMillis(); if (label == lastRateLabel && now - lastRateAt < 1500) return
-        lastRateLabel = label; lastRateAt = now; capture(s, root, label)
-    }
-    private fun recordRate(s: PayAccessibilityService, label: String, msg: String) {
-        val now = System.currentTimeMillis(); if (label == lastRateLabel && now - lastRateAt < 1500) return
-        lastRateLabel = label; lastRateAt = now; recordSynthetic(s, label, msg)
-    }
-    private fun capture(s: PayAccessibilityService, root: AccessibilityNodeInfo, label: String) {
-        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), root.packageName?.toString().orEmpty(), -710, "formal-sync-v71/$label", label, texts(root).joinToString("\n"), "")) } catch (_: Throwable) { }
-    }
-    private fun recordSynthetic(s: PayAccessibilityService, label: String, msg: String) {
-        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), GOOGLE_WALLET, -711, "formal-sync-v71/$label", label, msg, "")) } catch (_: Throwable) { }
-    }
-
-    private fun finish(returnToApp: Boolean) {
-        val s = service
-        running = false; tickScheduled = false; handler.removeCallbacks(tickRunnable)
-        if (s != null) {
-            val remaining = GoogleWalletTransactionStore.load(s).count { !it.detailChecked }
-            recordSynthetic(s, "v71-finish", "new=$newThisRun detail=$detailsThisRun total=${GoogleWalletTransactionStore.load(s).size} unresolvedRemaining=$remaining")
-            log(s, "=== Google Wallet V7.1 結束；new=$newThisRun detail=$detailsThisRun unresolved=$remaining ===")
-            if (returnToApp) try { s.packageManager.getLaunchIntentForPackage(SELF)?.let { it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP); s.startActivity(it) } } catch (_: Throwable) { }
-        }
-        pendingDetail = null; service = null
-    }
-
-    private fun log(s: PayAccessibilityService, message: String) {
-        val p = s.getSharedPreferences("v241", 0); val time = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()); val old = p.getString("log", "") ?: ""
-        p.edit().putString("log", ("[$time] $message\n" + old).take(40000)).apply()
-    }
+    private fun extractTransactionId(root:AccessibilityNodeInfo,values:List<String>):String{try{root.findAccessibilityNodeInfosByViewId("$GOOGLE_PLAY_SERVICES:id/UserVisibleTransactionId")?.firstOrNull()?.text?.toString()?.trim()?.takeIf{it.isNotBlank()}?.let{return it}}catch(_:Throwable){};val i=values.indexOfFirst{it=="交易 ID"||it.equals("Transaction ID",true)};return if(i>=0&&i+1<values.size)values[i+1].trim() else ""}
+    private fun parseRows(root:AccessibilityNodeInfo):List<GoogleWalletTransaction>{val out=LinkedHashMap<String,GoogleWalletTransaction>();val dr=Regex("^\\d{1,2}月\\d{1,2}日$");val ar=Regex("^\\$[0-9,]+(?:\\.[0-9]{2})?$");val controls=setOf("交易","交易記錄","查看更多交易","全部","Google Pay","Google Pay","搜尋","返回","在錢包中搜尋","憑證","會員方案");fun walk(n:AccessibilityNodeInfo?,d:Int){if(n==null||d>35)return;try{if(n.isClickable){val v=texts(n);val date=v.firstOrNull{dr.matches(it)};val amount=v.firstOrNull{ar.matches(it)};if(date!=null&&amount!=null){val shop=v.firstOrNull{it.isNotBlank()&&!dr.matches(it)&&!ar.matches(it)&&it !in controls&&!it.startsWith("末位數號碼為")&&!it.contains("••")}.orEmpty();if(shop.isNotBlank()){val tx=GoogleWalletTransaction(shop,amount.replace("$","").replace(",",""),normalizeWalletDate(date),System.currentTimeMillis());out[tx.fallbackKey]=tx}}};for(i in 0 until n.childCount)walk(n.getChild(i),d+1)}catch(_:Throwable){}};walk(root,0);return out.values.toList()}
+    private fun findRowNode(root:AccessibilityNodeInfo,tx:GoogleWalletTransaction):AccessibilityNodeInfo?{val p=tx.date.substringBefore(' ').split('/');val dl=if(p.size>=3)"${p[1].toIntOrNull()?:0}月${p[2].toIntOrNull()?:0}日" else "";var found:AccessibilityNodeInfo?=null;fun walk(n:AccessibilityNodeInfo?,d:Int){if(n==null||d>35||found!=null)return;try{if(n.isClickable){val v=texts(n);if(v.any{it==tx.shop}&&v.any{it==dl}&&v.any{cleanNumeric(it)==cleanNumeric(tx.amount)&&cleanNumeric(it).isNotBlank()}){found=n;return}};for(i in 0 until n.childCount)walk(n.getChild(i),d+1)}catch(_:Throwable){}};walk(root,0);return found}
+    private fun findCards(root:AccessibilityNodeInfo):List<WalletCard>{val nodes=try{root.findAccessibilityNodeInfosByViewId("$GOOGLE_WALLET:id/Card")?:emptyList()}catch(_:Throwable){emptyList()};return nodes.mapNotNull{n->val desc=texts(n).firstOrNull{it.startsWith("末位數號碼為")}?:return@mapNotNull null;val digits=Regex("末位數號碼為\\s*([0-9 ]+)").find(desc)?.groupValues?.getOrNull(1)?.filter{it.isDigit()}.orEmpty();val last4=digits.takeLast(4);if(last4.length!=4)return@mapNotNull null;var name=desc.substringAfter("的 ",desc).removeSuffix("卡片。").removeSuffix("卡片").trim();val type=normalizeCardType(name);if(type in setOf("Mastercard","Visa","JCB"))name=name.replace(type,"",true).trim();WalletCard(name,last4,if(type in setOf("Mastercard","Visa","JCB"))type else "")}.distinctBy{it.last4}}
+    private fun normalizeWalletDate(text:String):String{val m=Regex("^(\\d{1,2})月(\\d{1,2})日$").find(text)?:return text;val month=m.groupValues[1].toIntOrNull()?:return text;val day=m.groupValues[2].toIntOrNull()?:return text;val now=Calendar.getInstance();var year=now.get(Calendar.YEAR);if(month>now.get(Calendar.MONTH)+2)year--;return String.format(Locale.US,"%04d/%02d/%02d 12:00:00",year,month,day)}
+    private fun extractExactDateTime(originalDate:String,values:List<String>):String?{val r=Regex("(?i)(上午|下午|AM|PM)?\\s*(\\d{1,2})[:：](\\d{2})(?:[:：](\\d{2}))?");for(v in values){val m=r.find(v)?:continue;val period=m.groupValues[1].uppercase(Locale.US);var h=m.groupValues[2].toIntOrNull()?:continue;val min=m.groupValues[3].toIntOrNull()?:continue;val sec=m.groupValues[4].toIntOrNull()?:0;if(h !in 0..23||min !in 0..59||sec !in 0..59)continue;if((period=="下午"||period=="PM")&&h in 1..11)h+=12;if((period=="上午"||period=="AM")&&h==12)h=0;val day=originalDate.substringBefore(' ');if(Regex("^\\d{4}/\\d{2}/\\d{2}$").matches(day))return String.format(Locale.US,"%s %02d:%02d:%02d",day,h,min,sec)};return null}
+    private fun isRecent(date:String):Boolean=try{val f=SimpleDateFormat("yyyy/MM/dd",Locale.US);f.isLenient=false;val d=f.parse(date.substringBefore(' '));d!=null&&System.currentTimeMillis()-d.time<=NORMAL_DETAIL_MAX_AGE_DAYS*86400000L}catch(_:Throwable){false}
+    private fun normalizeCardType(v:String):String=when{v.contains("Mastercard",true)||v.contains("萬事達",true)->"Mastercard";v.contains("Visa",true)->"Visa";v.contains("JCB",true)->"JCB";else->v.trim()}
+    private fun inferBank(n:String):String=when{n.contains("彰化銀行")||n.contains("彰銀")->"彰銀";n.contains("台新")->"台新";n.contains("國泰")->"國泰";n.contains("玉山")->"玉山";n.contains("中信")||n.contains("中國信託")->"中信";n.contains("富邦")->"富邦";n.contains("永豐")->"永豐";n.contains("星展")->"星展";n.contains("聯邦")->"聯邦";n.contains("第一銀行")||n.contains("一銀")->"一銀";n.contains("兆豐")->"兆豐";n.contains("華南")->"華南";else->""}
+    private fun texts(root:AccessibilityNodeInfo):List<String>{val out=ArrayList<String>();fun walk(n:AccessibilityNodeInfo?,d:Int){if(n==null||d>26||out.size>280)return;try{n.text?.toString()?.trim()?.takeIf{it.isNotEmpty()}?.let{out.add(it)};n.contentDescription?.toString()?.trim()?.takeIf{it.isNotEmpty()&&it!="Image"}?.let{out.add(it)};for(i in 0 until n.childCount)walk(n.getChild(i),d+1)}catch(_:Throwable){}};walk(root,0);return out}
+    private fun findExactText(root:AccessibilityNodeInfo,target:String):AccessibilityNodeInfo?{try{if(root.text?.toString()?.trim()==target||root.contentDescription?.toString()?.trim()==target)return root;for(i in 0 until root.childCount)root.getChild(i)?.let{findExactText(it,target)}?.let{return it}}catch(_:Throwable){};return null}
+    private fun isWalletHome(root:AccessibilityNodeInfo,values:List<String> = texts(root)):Boolean{if(values.any{it=="查看更多交易"}||values.any{it=="交易記錄"})return false;return values.any{it=="付款卡"}&&findCards(root).isNotEmpty()}
+    private fun tapText(s:PayAccessibilityService,root:AccessibilityNodeInfo,text:String,label:String){findExactText(root,text)?.let{tapNode(s,it,label)}}
+    private fun tapNode(s:PayAccessibilityService,node:AccessibilityNodeInfo,label:String)=tapNodeOffset(s,node,.5f,label)
+    private fun tapNodeOffset(s:PayAccessibilityService,node:AccessibilityNodeInfo,xf:Float,label:String){val r=Rect();try{node.getBoundsInScreen(r)}catch(_:Throwable){return};if(r.isEmpty)return;tapPoint(s,r.left+r.width()*xf.coerceIn(.15f,.85f),r.exactCenterY(),label)}
+    private fun tapPoint(s:PayAccessibilityService,x:Float,y:Float,label:String){try{val p=Path();p.moveTo(x,y);val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,90)).build();s.dispatchGesture(g,object:AccessibilityService.GestureResultCallback(){override fun onCompleted(gd:GestureDescription?){poke()};override fun onCancelled(gd:GestureDescription?){poke()}},null)}catch(_:Throwable){poke()}}
+    private fun swipeUp(s:PayAccessibilityService,label:String){val dm=s.resources.displayMetrics;val x=dm.widthPixels/2f;val y1=dm.heightPixels*.78f;val y2=dm.heightPixels*.30f;try{val p=Path();p.moveTo(x,y1);p.lineTo(x,y2);val g=GestureDescription.Builder().addStroke(GestureDescription.StrokeDescription(p,0,420)).build();s.dispatchGesture(g,object:AccessibilityService.GestureResultCallback(){override fun onCompleted(gd:GestureDescription?){poke()};override fun onCancelled(gd:GestureDescription?){poke()}},null)}catch(_:Throwable){poke()}}
+    private fun back(s:PayAccessibilityService,label:String){try{s.performGlobalAction(AccessibilityService.GLOBAL_ACTION_BACK)}catch(_:Throwable){}}
+    private fun mergeRows(s:PayAccessibilityService,rows:List<GoogleWalletTransaction>){if(rows.isNotEmpty())GoogleWalletTransactionStore.merge(s,rows)}
+    private fun cleanNumeric(v:String)=v.replace(Regex("[^0-9.]"),"").trimStart('0');private fun safe(v:String)=v.replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]"),"_").take(24);private fun resetPageState(){page=0;lastFingerprint="";noMoveCount=0;consecutiveKnownPages=0}
+    private fun capture(s:PayAccessibilityService,root:AccessibilityNodeInfo,label:String){try{GoogleWalletDiagnosticStore.add(s,GoogleWalletDiagnosticCapture(System.currentTimeMillis(),root.packageName?.toString().orEmpty(),-710,"formal-sync-v72/$label",label,texts(root).joinToString("\n"),""))}catch(_:Throwable){}}
+    private fun recordSynthetic(s:PayAccessibilityService,label:String,msg:String){try{GoogleWalletDiagnosticStore.add(s,GoogleWalletDiagnosticCapture(System.currentTimeMillis(),GOOGLE_WALLET,-711,"formal-sync-v72/$label",label,msg,""))}catch(_:Throwable){}}
+    private fun finish(returnToApp:Boolean){val s=service;running=false;tickScheduled=false;handler.removeCallbacks(tickRunnable);if(s!=null&&returnToApp)try{s.packageManager.getLaunchIntentForPackage(SELF)?.let{it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP);s.startActivity(it)}}catch(_:Throwable){};pendingDetail=null;service=null}
 }
