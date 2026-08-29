@@ -1,19 +1,22 @@
 package tw.apostar.notificationpaytest
 
+import android.accessibilityservice.AccessibilityService
+import android.graphics.Bitmap
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.view.Display
 import android.view.accessibility.AccessibilityNodeInfo
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.chinese.ChineseTextRecognizerOptions
 
 /**
- * Independent safety-net observer for Google Wallet transaction detail pages.
+ * Safety-net observer for Google Wallet detail pages.
  *
- * Some Google/Android builds render the issuer/card chip visibly but expose it to
- * Accessibility differently from the rest of the detail page. The main sync parser
- * therefore can occasionally miss bank/card metadata even though the user can see it.
- * This observer watches the active detail page while the normal V74 controller runs,
- * identifies the matching stored transaction by merchant + amount, and persists any
- * bank/card metadata it can read. Bank-only metadata is still useful because Pay Helper
- * can safely match it when that bank has exactly one eligible configured card.
+ * First use Accessibility text. If Google/GMS visually renders the issuer/card chip but
+ * does not expose it in the accessibility tree, Android 11+ screenshot OCR reads the
+ * actual pixels on screen and persists bank/card metadata back to the same transaction.
  */
 object GoogleWalletCardBackfillObserver {
     private const val WALLET = "com.google.android.apps.walletnfcrel"
@@ -21,14 +24,21 @@ object GoogleWalletCardBackfillObserver {
     private val handler = Handler(Looper.getMainLooper())
     private var running = false
     private var service: PayAccessibilityService? = null
+    private var ocrBusy = false
+    private var lastOcrAt = 0L
+    private var lastOcrKey = ""
+    private val recognizer by lazy { TextRecognition.getClient(ChineseTextRecognizerOptions.Builder().build()) }
 
     @JvmStatic
     fun start(s: PayAccessibilityService) {
         service = s
         if (running) return
         running = true
+        ocrBusy = false
+        lastOcrAt = 0L
+        lastOcrKey = ""
         handler.removeCallbacks(runner)
-        handler.postDelayed(runner, 250L)
+        handler.postDelayed(runner, 200L)
     }
 
     @JvmStatic
@@ -36,6 +46,7 @@ object GoogleWalletCardBackfillObserver {
         running = false
         handler.removeCallbacks(runner)
         service = null
+        ocrBusy = false
     }
 
     private val runner = object : Runnable {
@@ -47,7 +58,7 @@ object GoogleWalletCardBackfillObserver {
                 return
             }
             try { inspect(s) } catch (_: Throwable) { }
-            if (running) handler.postDelayed(this, 250L)
+            if (running) handler.postDelayed(this, 200L)
         }
     }
 
@@ -63,10 +74,8 @@ object GoogleWalletCardBackfillObserver {
             vals.any { it == "線上購物" || it == "使用手機購買" || it.contains("感應付款") }
         if (!looksDetail) return
 
-        val bankLine = vals.firstOrNull { inferBank(it).isNotBlank() } ?: return
-        val bank = inferBank(bankLine)
-        if (bank.isBlank()) return
-
+        // Identify the transaction independently of card metadata. Merchant + amount is
+        // normally visible to Accessibility even on builds that hide the card chip.
         val stored = GoogleWalletTransactionStore.load(s)
         val candidates = stored.filter { tx ->
             joined.contains(tx.shop, ignoreCase = true) && amountVisible(vals, tx.amount)
@@ -74,27 +83,112 @@ object GoogleWalletCardBackfillObserver {
         if (candidates.size != 1) return
         val tx = candidates.first()
 
-        val last4 = extractLast4(vals, bankLine)
-        val cardName = cleanCardName(bankLine)
-        val cardType = normalizeCard(cardName)
-
-        val changed = GoogleWalletTransactionStore.updateDetail(
-            s,
-            tx.fallbackKey,
-            "",
-            "",
-            "",
-            "",
-            "",
-            cardName,
-            bank,
-            last4,
-            cardType,
-            if (last4.length == 4) "detail-observer-bank-last4" else "detail-observer-bank-only"
-        )
-        if (changed) {
-            record(s, tx, bank, last4, cardName)
+        // Fast path: Accessibility itself exposes the bank/card chip.
+        val bankLine = vals.firstOrNull { inferBank(it).isNotBlank() }
+        if (bankLine != null) {
+            val bank = inferBank(bankLine)
+            val last4 = extractLast4(vals, bankLine)
+            val cardName = cleanCardName(bankLine)
+            val cardType = normalizeCard(cardName)
+            save(s, tx, bank, last4, cardName, cardType,
+                if (last4.length == 4) "detail-observer-bank-last4" else "detail-observer-bank-only")
+            if (bank.isNotBlank() && last4.length == 4) return
         }
+
+        // Pixel fallback: the user can see the chip but Google does not expose it to the
+        // accessibility tree. OCR the actual screen instead of guessing node structure.
+        requestOcr(s, tx)
+    }
+
+    private fun requestOcr(s: PayAccessibilityService, tx: GoogleWalletTransaction) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R || ocrBusy) return
+        val now = System.currentTimeMillis()
+        if (lastOcrKey == tx.fallbackKey && now - lastOcrAt < 900L) return
+        lastOcrKey = tx.fallbackKey
+        lastOcrAt = now
+        ocrBusy = true
+
+        try {
+            s.takeScreenshot(Display.DEFAULT_DISPLAY, s.mainExecutor, object : AccessibilityService.TakeScreenshotCallback {
+                override fun onSuccess(screenshot: AccessibilityService.ScreenshotResult) {
+                    val buffer = screenshot.hardwareBuffer
+                    val wrapped = try { Bitmap.wrapHardwareBuffer(buffer, screenshot.colorSpace) } catch (_: Throwable) { null }
+                    val bitmap = try { wrapped?.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Throwable) { null }
+                    try { buffer.close() } catch (_: Throwable) { }
+                    if (bitmap == null) {
+                        ocrBusy = false
+                        recordRaw(s, "ocr-bitmap-null", tx.fallbackKey)
+                        return
+                    }
+                    val image = InputImage.fromBitmap(bitmap, 0)
+                    recognizer.process(image)
+                        .addOnSuccessListener { result ->
+                            try { processOcrText(s, tx, result.text) } catch (_: Throwable) { }
+                        }
+                        .addOnFailureListener { e -> recordRaw(s, "ocr-failed", "${tx.fallbackKey} ${e.javaClass.simpleName}:${e.message}") }
+                        .addOnCompleteListener {
+                            try { bitmap.recycle() } catch (_: Throwable) { }
+                            ocrBusy = false
+                        }
+                }
+
+                override fun onFailure(errorCode: Int) {
+                    ocrBusy = false
+                    recordRaw(s, "ocr-screenshot-failed", "${tx.fallbackKey} code=$errorCode")
+                }
+            })
+        } catch (t: Throwable) {
+            ocrBusy = false
+            recordRaw(s, "ocr-exception", "${tx.fallbackKey} ${t.javaClass.simpleName}:${t.message}")
+        }
+    }
+
+    private fun processOcrText(s: PayAccessibilityService, tx: GoogleWalletTransaction, rawText: String) {
+        val lines = rawText.lines().map { it.trim() }.filter { it.isNotBlank() }
+        val joined = lines.joinToString(" ")
+        val bankLine = lines.firstOrNull { inferBank(it).isNotBlank() }
+        val bank = bankLine?.let(::inferBank).orEmpty()
+        if (bank.isBlank()) {
+            recordRaw(s, "ocr-no-bank", "${tx.fallbackKey} text=${joined.take(600)}")
+            return
+        }
+
+        val last4 = extractLast4(lines, bankLine.orEmpty()).ifBlank { extractKnownCardLast4FromOcr(lines) }
+        val cardName = cleanCardName(bankLine.orEmpty()).ifBlank { bankLine.orEmpty() }
+        val cardType = normalizeCard(cardName)
+        save(s, tx, bank, last4, cardName, cardType,
+            if (last4.length == 4) "screen-ocr-bank-last4" else "screen-ocr-bank-only")
+        recordRaw(s, "ocr-saved", "${tx.fallbackKey} bank=$bank last4=$last4 card=$cardName text=${joined.take(600)}")
+    }
+
+    private fun extractKnownCardLast4FromOcr(lines: List<String>): String {
+        val candidates = LinkedHashSet<String>()
+        lines.forEach { raw ->
+            // OCR often turns bullets into punctuation or drops them entirely. Restrict
+            // fallback to card-looking lines so date/time/transaction-id digits are ignored.
+            val cardLooking = inferBank(raw).isNotBlank() || raw.contains("Mastercard", true) ||
+                raw.contains("Visa", true) || raw.contains("JCB", true) || raw.contains("萬事達") || raw.contains("卡")
+            if (!cardLooking) return@forEach
+            Regex("(?<![0-9])([0-9]{4})(?![0-9])").findAll(raw).forEach { candidates.add(it.groupValues[1]) }
+        }
+        return if (candidates.size == 1) candidates.first() else ""
+    }
+
+    private fun save(
+        s: PayAccessibilityService,
+        tx: GoogleWalletTransaction,
+        bank: String,
+        last4: String,
+        cardName: String,
+        cardType: String,
+        source: String
+    ) {
+        if (bank.isBlank()) return
+        val changed = GoogleWalletTransactionStore.updateDetail(
+            s, tx.fallbackKey, "", "", "", "", "",
+            cardName, bank, last4, cardType, source
+        )
+        if (changed) record(s, tx, bank, last4, cardName, source)
     }
 
     private fun amountVisible(vals: List<String>, amount: String): Boolean {
@@ -114,42 +208,24 @@ object GoogleWalletCardBackfillObserver {
     private fun extractLast4(vals: List<String>, bankLine: String): String {
         fun last4From(raw: String): String {
             val explicit = Regex("(?:[•·●∙⋅‧・▪◦]{1,}|末四碼|末4碼|尾號|後四碼|末位數(?:號碼)?(?:為)?)[\\s:：\\u00a0\\u200b\\u200e\\u200f]*([0-9](?:[\\s\\u00a0\\u200b\\u200e\\u200f]*[0-9]){3})", RegexOption.IGNORE_CASE)
-                .find(raw)
-                ?.groupValues
-                ?.getOrNull(1)
-                ?.filter { it.isDigit() }
-                ?.takeLast(4)
-                .orEmpty()
+                .find(raw)?.groupValues?.getOrNull(1)?.filter { it.isDigit() }?.takeLast(4).orEmpty()
             if (explicit.length == 4) return explicit
-
             val compact = raw.replace(Regex("[\\s\\u00a0\\u200b\\u200e\\u200f]"), "")
-            val tail = Regex("([0-9]{4})$").find(compact)?.groupValues?.getOrNull(1).orEmpty()
-            return tail.takeIf { it.length == 4 } ?: ""
+            return Regex("([0-9]{4})$").find(compact)?.groupValues?.getOrNull(1).orEmpty()
         }
-
         last4From(bankLine).takeIf { it.length == 4 }?.let { return it }
-
         val explicit = vals.map(::last4From).filter { it.length == 4 }.distinct()
-        if (explicit.size == 1) return explicit.first()
-
-        val standalone = vals.mapNotNull { raw ->
-            val trimmed = raw.trim()
-            val digits = trimmed.filter { it.isDigit() }
-            if (digits.length == 4 && trimmed.none { it.isLetter() } &&
-                !trimmed.contains(':') && !trimmed.contains('/') && !trimmed.contains('-')) digits else null
-        }.distinct()
-        return if (standalone.size == 1) standalone.first() else ""
+        return if (explicit.size == 1) explicit.first() else ""
     }
 
-    private fun cleanCardName(raw: String): String {
-        return raw
-            .replace('\u00a0', ' ')
-            .replace("\u200b", "")
-            .replace("\u200e", "")
-            .replace("\u200f", "")
-            .replace(Regex("[\\s]*[•·●∙⋅‧・▪◦]{1,}[\\s]*[0-9 ]{4,}.*$"), "")
-            .trim(' ', ':', '：', '-', '–', '—', ',', '，')
-    }
+    private fun cleanCardName(raw: String): String = raw
+        .replace('\u00a0', ' ')
+        .replace("\u200b", "")
+        .replace("\u200e", "")
+        .replace("\u200f", "")
+        .replace(Regex("[\\s]*[•·●∙⋅‧・▪◦]{1,}[\\s]*[0-9 ]{4,}.*$"), "")
+        .replace(Regex("[\\s]+[0-9]{4}$"), "")
+        .trim(' ', ':', '：', '-', '–', '—', ',', '，')
 
     private fun normalizeCard(v: String): String = when {
         v.contains("Mastercard", true) || v.contains("萬事達") -> "Mastercard"
@@ -188,18 +264,17 @@ object GoogleWalletCardBackfillObserver {
         return out.distinct()
     }
 
-    private fun record(s: PayAccessibilityService, tx: GoogleWalletTransaction, bank: String, last4: String, cardName: String) {
+    private fun record(s: PayAccessibilityService, tx: GoogleWalletTransaction, bank: String, last4: String, cardName: String, source: String) {
+        recordRaw(s, "detail-observer-saved", "${tx.fallbackKey} bank=$bank last4=$last4 card=$cardName source=$source")
+    }
+
+    private fun recordRaw(s: PayAccessibilityService, label: String, message: String) {
         try {
             GoogleWalletDiagnosticStore.add(
                 s,
                 GoogleWalletDiagnosticCapture(
-                    System.currentTimeMillis(),
-                    GMS,
-                    -790,
-                    "formal-sync-v79/detail-observer",
-                    "detail-observer-saved",
-                    "${tx.fallbackKey} bank=$bank last4=$last4 card=$cardName",
-                    ""
+                    System.currentTimeMillis(), GMS, -800,
+                    "formal-sync-v80/screen-ocr", label, message, ""
                 )
             )
         } catch (_: Throwable) { }
