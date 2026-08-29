@@ -136,6 +136,31 @@
             override fun onCompleted(gd:GestureDescription?){log("swipe completed");h.postDelayed({step()},900)}
         },null)
     }
+
+    // Unified sync handoff API. Keep the orchestration bridge out of private-field
+    // reflection: these methods operate on the actual AccessibilityService state.
+    fun isJkoSyncRunningForHandoff():Boolean = running
+    fun isLinePaySyncRunningForHandoff():Boolean = linePayFormalMode
+    fun isPiSyncRunningForHandoff():Boolean = piFormalMode
+
+    fun forceStopPaymentSyncForHandoff(){
+        running=false
+        linePayFormalMode=false
+        piFormalMode=false
+        linePayDiagnosticRunning=false
+        piDiagnosticRunning=false
+        googleWalletDiagnosticRunning=false
+        linePayFormalScheduled=false
+        piFormalScheduled=false
+        transactionClickPending=false
+        piDetailOpening=false
+        piReturnPending=false
+        linePayReturnPending=false
+        linePayHistoryScrollInFlight=false
+        h.removeCallbacksAndMessages(null)
+        log("↪ Unified sync handoff：已釋放上一個支付來源的同步狀態")
+    }
+
     private fun finish(){
         if(!running)return
         running=false
