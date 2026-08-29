@@ -71,12 +71,12 @@ object GoogleWalletSyncControllerV74 {
         val pruned = GoogleWalletTransactionStore.pruneUnresolvedOlderThan(s, RECENT_DAYS)
         s.stopGoogleWalletDiagnostic(false)
         GoogleWalletDiagnosticStore.clear(s)
-        record(s, "v75-start", "existing=${GoogleWalletTransactionStore.load(s).size} dedup=$dedup pruned=$pruned cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
+        record(s, "v76-start", "existing=${GoogleWalletTransactionStore.load(s).size} dedup=$dedup pruned=$pruned cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
 
         val launch = s.packageManager.getLaunchIntentForPackage(WALLET)
-        if (launch == null) { record(s, "v75-launch-missing", ""); finish(true); return }
+        if (launch == null) { record(s, "v76-launch-missing", ""); finish(true); return }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        try { s.startActivity(launch) } catch (t: Throwable) { record(s, "v75-launch-error", t.message.orEmpty()) }
+        try { s.startActivity(launch) } catch (t: Throwable) { record(s, "v76-launch-error", t.message.orEmpty()) }
         schedule(1200)
     }
 
@@ -93,18 +93,18 @@ object GoogleWalletSyncControllerV74 {
     private fun safeTick() {
         val s = service ?: return
         try { tick(s) } catch (t: Throwable) {
-            record(s, "v75-error-state$state", "${t.javaClass.simpleName}:${t.message}")
+            record(s, "v76-error-state$state", "${t.javaClass.simpleName}:${t.message}")
             schedule(700)
         }
     }
 
     private fun tick(s: PayAccessibilityService) {
         if (!running) return
-        if (System.currentTimeMillis() - startedAt > 360_000L) { record(s, "v75-timeout", "keys=${unresolvedKeys(s)}"); finish(true); return }
+        if (System.currentTimeMillis() - startedAt > 360_000L) { record(s, "v76-timeout", "keys=${unresolvedKeys(s)}"); finish(true); return }
         val root = try { s.rootInActiveWindow } catch (_: Throwable) { null }
         if (root == null) { schedule(); return }
         val pkg = root.packageName?.toString().orEmpty()
-        if (pkg == SELF) { record(s, "v75-returned-to-app", "state=$state"); finish(false); return }
+        if (pkg == SELF) { record(s, "v76-returned-to-app", "state=$state"); finish(false); return }
         val accepted = if (state == DETAIL) pkg == WALLET || pkg == GMS else pkg == WALLET
         if (!accepted) { schedule(); return }
         when (state) {
@@ -118,7 +118,7 @@ object GoogleWalletSyncControllerV74 {
     private fun onHome(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
         cards = findCards(root)
         if (cards.isEmpty()) { schedule(600); return }
-        record(s, "v75-home", "cards=${cards.joinToString(",") { it.last4 }} cardUnresolved=${unresolvedCount(s)}")
+        record(s, "v76-home", "cards=${cards.joinToString(",") { it.last4 }} cardUnresolved=${unresolvedCount(s)}")
         state = OPEN_MORE
         schedule(900)
         tapText(s, root, "顯示更多", "home-more")
@@ -171,11 +171,11 @@ object GoogleWalletSyncControllerV74 {
             val node = findRow(root, candidate)
             if (node != null) {
                 val x = stored[candidate.fallbackKey]
-                record(s, "v75-force-detail", "${candidate.fallbackKey} detailChecked=${x?.detailChecked} bank=${x?.bank.orEmpty()} last4=${x?.cardLast4.orEmpty()}")
+                record(s, "v76-force-detail", "${candidate.fallbackKey} detailChecked=${x?.detailChecked} bank=${x?.bank.orEmpty()} last4=${x?.cardLast4.orEmpty()}")
                 pending = candidate
                 detailTry = 0
                 state = DETAIL
-                capture(s, root, "v75-before-detail-${safe(candidate.shop)}")
+                capture(s, root, "v76-before-detail-${safe(candidate.shop)}")
                 schedule(850)
                 tapNode(s, node, "detail-${safe(candidate.shop)}", true)
                 return
@@ -190,10 +190,10 @@ object GoogleWalletSyncControllerV74 {
         noMove = if (fp == lastFp) noMove + 1 else 0
         lastFp = fp
         val unresolved = unresolvedCount(s)
-        record(s, "v75-history-page$page", "rows=${rows.size} cardUnresolved=$unresolved knownPages=$knownPages noMove=$noMove")
+        record(s, "v76-history-page$page", "rows=${rows.size} cardUnresolved=$unresolved knownPages=$knownPages noMove=$noMove")
 
         if (unresolved == 0 && knownPages >= 2) { finish(true); return }
-        if (noMove >= 3 || page >= MAX_PAGES) { record(s, "v75-stop-history", "keys=${unresolvedKeys(s)}"); finish(true); return }
+        if (noMove >= 3 || page >= MAX_PAGES) { record(s, "v76-stop-history", "keys=${unresolvedKeys(s)}"); finish(true); return }
         page++
         schedule(900)
         swipeUp(s, "page$page")
@@ -212,7 +212,7 @@ object GoogleWalletSyncControllerV74 {
                         c?.name.orEmpty(), c?.let { inferBank(it.name) }.orEmpty(), c?.last4.orEmpty(), c?.type.orEmpty(), m.source)) {
                     detailCount++
                 }
-                record(s, "v75-detail-ok", "${tx.fallbackKey} time=${m.time} id=${m.id} card=${c?.name.orEmpty()} last4=${c?.last4.orEmpty()} source=${m.source} cardUnresolved=${unresolvedCount(s)}")
+                record(s, "v76-detail-ok", "${tx.fallbackKey} time=${m.time} id=${m.id} card=${c?.name.orEmpty()} last4=${c?.last4.orEmpty()} bank=${c?.let { inferBank(it.name) }.orEmpty()} source=${m.source} cardUnresolved=${unresolvedCount(s)}")
                 visited.add(tx.fallbackKey)
                 pending = null; detailTry = 0; state = HISTORY
                 schedule(900); back(s, "detail-success"); return
@@ -223,14 +223,14 @@ object GoogleWalletSyncControllerV74 {
         if (pkg == WALLET && vals.any { it == tx.shop } && detailTry in listOf(3, 6, 9, 12)) {
             findRow(root, tx)?.let { row ->
                 val xf = when (detailTry) { 3 -> .72f; 6 -> .30f; 9 -> .86f; else -> .16f }
-                record(s, "v75-detail-navigation-retry", "${tx.fallbackKey} try=$detailTry x=$xf")
+                record(s, "v76-detail-navigation-retry", "${tx.fallbackKey} try=$detailTry x=$xf")
                 schedule(800); tapAt(s, row, xf, "detail-retry-${safe(tx.shop)}-$detailTry"); return
             }
         }
         if (detailTry < 15) { schedule(300); return }
 
         navFailCount++
-        record(s, "v75-detail-navigation-failed", "${tx.fallbackKey} attempts=$detailTry")
+        record(s, "v76-detail-navigation-failed", "${tx.fallbackKey} attempts=$detailTry")
         visited.add(tx.fallbackKey)
         pending = null; detailTry = 0; state = HISTORY
         schedule(800)
@@ -246,7 +246,7 @@ object GoogleWalletSyncControllerV74 {
             keep.forEach { tx ->
                 val old = before["${tx.date.substringBefore(' ')}|${tx.amount}"]
                 if (old != null && old.shop != tx.shop && old.shop.trim().length <= 2 && tx.shop.trim().length > old.shop.trim().length) {
-                    record(s, "v75-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
+                    record(s, "v76-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
                 }
             }
         }
@@ -352,31 +352,45 @@ object GoogleWalletSyncControllerV74 {
         val id = extractId(root, vals)
         val txType = vals.firstOrNull { it == "使用手機購買" || it == "線上購物" || it.contains("感應付款") }.orEmpty()
         var vt = ""; var vl = ""
-        val vr = Regex("(?i)(Mastercard|Visa|JCB)\\s*••\\s*([0-9 ]{4,})")
+        val vr = Regex("(?i)(Mastercard|Visa|JCB|萬事達)\\s*••\\s*([0-9 ]{4,})")
         vals.forEach { v -> vr.find(v)?.let { mm -> vt = normalizeCard(mm.groupValues[1]); vl = mm.groupValues[2].filter { it.isDigit() }.takeLast(4) } }
 
-        // Transaction-detail text is the strongest evidence. Example:
-        // "彰化銀行萬事達鈦金商旅卡 ••0102".
         extractExplicitDetailCard(vals)?.let { return Meta(time, id, txType, vl, vt, it, "detail-bank-last4") }
 
         val compact = vals.joinToString(" ").replace(" ", "")
         cards.firstOrNull { compact.contains("••${it.last4}") }?.let { return Meta(time, id, txType, vl, vt, it, "explicit-wallet-last4") }
-
-        // Card-network-only evidence is not enough to assign a physical card.
         return Meta(time, id, txType, vl, vt, null, "")
     }
 
     private fun extractExplicitDetailCard(vals: List<String>): Card? {
-        val r = Regex("(.+?)\\s*[•·]{2}\\s*([0-9 ]{4,})$")
-        for (raw in vals) {
-            val v = raw.trim()
-            val m = r.find(v) ?: continue
-            val last4 = m.groupValues[2].filter { it.isDigit() }.takeLast(4)
-            if (last4.length != 4) continue
-            val name = m.groupValues[1].trim()
-            if (name.equals("Mastercard", true) || name.equals("Visa", true) || name.equals("JCB", true)) continue
+        fun build(nameRaw: String, lastRaw: String): Card? {
+            val last4 = lastRaw.filter { it.isDigit() }.takeLast(4)
+            if (last4.length != 4) return null
+            val name = nameRaw.trim().trimEnd(':', '：')
+            if (name.isBlank() || name.equals("Mastercard", true) || name.equals("Visa", true) || name.equals("JCB", true) || name == "萬事達") return null
+            val looksPhysical = inferBank(name).isNotBlank() || name.contains("銀行") || name.contains("信用卡") || name.contains("卡")
+            if (!looksPhysical) return null
             val type = normalizeCard(name)
             return Card(name, last4, if (type in setOf("Mastercard", "Visa", "JCB")) type else "")
+        }
+
+        // Some Android/GMS builds expose the issuer and last4 in one accessibility string.
+        val sameLine = Regex("(.+?)\\s*[•·]{2}\\s*([0-9 ]{4,})$")
+        for (raw in vals) {
+            val m = sameLine.find(raw.trim()) ?: continue
+            build(m.groupValues[1], m.groupValues[2])?.let { return it }
+        }
+
+        // Other builds split the same visual row into sibling nodes, e.g.
+        // ["彰化銀行萬事達鈦金商旅卡", "••0102"]. Search a few preceding
+        // accessibility values so the physical card is still recovered.
+        val lastOnly = Regex("^[•·]{2}\\s*([0-9 ]{4,})$")
+        for (i in vals.indices) {
+            val m = lastOnly.find(vals[i].trim()) ?: continue
+            val start = maxOf(0, i - 3)
+            for (j in i - 1 downTo start) {
+                build(vals[j], m.groupValues[1])?.let { return it }
+            }
         }
         return null
     }
@@ -410,12 +424,17 @@ object GoogleWalletSyncControllerV74 {
             if (last4.length != 4) return@mapNotNull null
             var name = desc.substringAfter("的 ", desc).removeSuffix("卡片。").removeSuffix("卡片").trim()
             val type = normalizeCard(name)
-            if (type in setOf("Mastercard", "Visa", "JCB")) name = name.replace(type, "", true).trim()
+            if (type in setOf("Mastercard", "Visa", "JCB")) name = name.replace("Mastercard", "", true).replace("Visa", "", true).replace("JCB", "", true).replace("萬事達", "", true).trim()
             Card(name, last4, if (type in setOf("Mastercard", "Visa", "JCB")) type else "")
         }.distinctBy { it.last4 }
     }
 
-    private fun normalizeCard(v: String): String = when { v.contains("Mastercard", true) -> "Mastercard"; v.contains("Visa", true) -> "Visa"; v.contains("JCB", true) -> "JCB"; else -> v.trim() }
+    private fun normalizeCard(v: String): String = when {
+        v.contains("Mastercard", true) || v.contains("萬事達") -> "Mastercard"
+        v.contains("Visa", true) -> "Visa"
+        v.contains("JCB", true) -> "JCB"
+        else -> v.trim()
+    }
     private fun inferBank(n: String): String = when {
         n.contains("彰化銀行") || n.contains("彰銀") -> "彰銀"
         n.contains("台新") -> "台新"
@@ -499,19 +518,19 @@ object GoogleWalletSyncControllerV74 {
     private fun safe(v: String) = v.replace(Regex("[^A-Za-z0-9\\u4e00-\\u9fff_-]"), "_").take(24)
 
     private fun capture(s: PayAccessibilityService, root: AccessibilityNodeInfo, label: String) {
-        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), root.packageName?.toString().orEmpty(), -750, "formal-sync-v75/$label", label, texts(root).joinToString("\n"), "")) } catch (_: Throwable) { }
+        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), root.packageName?.toString().orEmpty(), -760, "formal-sync-v76/$label", label, texts(root).joinToString("\n"), "")) } catch (_: Throwable) { }
     }
     private fun record(s: PayAccessibilityService, label: String, msg: String) {
-        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), WALLET, -751, "formal-sync-v75/$label", label, msg, "")) } catch (_: Throwable) { }
+        try { GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), WALLET, -761, "formal-sync-v76/$label", label, msg, "")) } catch (_: Throwable) { }
     }
 
     private fun finish(returnToApp: Boolean) {
         val s = service
         running = false; scheduled = false; handler.removeCallbacks(runner)
         if (s != null) {
-            record(s, "v75-finish", "detail=$detailCount navigationFailures=$navFailCount total=${GoogleWalletTransactionStore.load(s).size} cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
+            record(s, "v76-finish", "detail=$detailCount navigationFailures=$navFailCount total=${GoogleWalletTransactionStore.load(s).size} cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
             val p = s.getSharedPreferences("v241", 0); val tm = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date()); val old = p.getString("log", "") ?: ""
-            p.edit().putString("log", ("[$tm] Google Wallet V7.5 finish cardUnresolved=${unresolvedCount(s)}\n" + old).take(40000)).apply()
+            p.edit().putString("log", ("[$tm] Google Wallet V7.6 finish cardUnresolved=${unresolvedCount(s)}\n" + old).take(40000)).apply()
             if (returnToApp) try { s.packageManager.getLaunchIntentForPackage(SELF)?.let { it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP); s.startActivity(it) } } catch (_: Throwable) { }
         }
         pending = null; service = null
