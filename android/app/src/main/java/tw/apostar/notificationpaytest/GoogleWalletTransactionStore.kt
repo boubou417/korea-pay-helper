@@ -49,9 +49,18 @@ object GoogleWalletTransactionStore {
 
     fun load(c: Context): List<GoogleWalletTransaction> = normalize(loadRaw(c), false)
 
+    /**
+     * De-duplicate legacy Google Wallet rows without destroying card metadata.
+     *
+     * Older versions used normalize(raw, true), which cleared bank/cardName/cardLast4
+     * from every row whose transactionId happened to be blank. Because this method is
+     * called at the start of every sync, a card successfully recovered from a detail
+     * page could be erased again on the very next run. Keep all recovered metadata and
+     * only perform normal de-duplication here.
+     */
     fun compactLegacyGlobalHistory(c: Context): Int {
         val raw = loadRaw(c)
-        val normalized = normalize(raw, true)
+        val normalized = normalize(raw, false)
         save(c, normalized)
         return (raw.size - normalized.size).coerceAtLeast(0)
     }
@@ -77,15 +86,6 @@ object GoogleWalletTransactionStore {
     fun unresolvedSummary(c: Context, maxAgeDays: Int? = null, limit: Int = 12): String =
         unresolved(c, maxAgeDays).take(limit).joinToString(" || ") { it.fallbackKey }
 
-    /**
-     * V7.6: repair suspicious legacy merchant aliases BEFORE normal duplicate lookup.
-     *
-     * V7.5 only repaired the short alias when no full-key row already existed. If a
-     * previous scan had already created the full merchant row, index was >= 0 and the
-     * unresolved short row (for example "早") survived forever. V7.6 always migrates
-     * every matching unresolved short row first. normalize() then safely coalesces it
-     * with any full-name duplicate.
-     */
     fun merge(c: Context, incoming: List<GoogleWalletTransaction>): Int {
         if (incoming.isEmpty()) return 0
         val current = load(c).toMutableList()
@@ -93,9 +93,7 @@ object GoogleWalletTransactionStore {
 
         incoming.forEach { x ->
             val xDay = x.date.substringBefore(' ')
-            val xAmount = cleanAmount(x.amount)
 
-            // Force merchant migration first, even when a full-name duplicate already exists.
             for (i in current.indices) {
                 val old = current[i]
                 val aliasMatch = !old.detailChecked && old.transactionId.isBlank() &&
@@ -112,8 +110,6 @@ object GoogleWalletTransactionStore {
                 }
             }
 
-            // Re-normalize in memory so a migrated alias and an existing full-name row
-            // become one row before we locate/update the incoming transaction.
             val normalizedNow = normalize(current, false)
             current.clear()
             current.addAll(normalizedNow)
