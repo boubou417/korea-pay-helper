@@ -11,7 +11,7 @@ import android.os.SystemClock;
 import tw.apostar.notificationpaytest.GoogleWalletSyncControllerV3;
 import tw.apostar.notificationpaytest.PayAccessibilityService;
 
-/** V6.2.3: unified sync with per-wallet timeout, total watchdog and persistent result log. */
+/** Unified sync with per-wallet timeout, total watchdog and persistent result log. */
 public final class UnifiedSyncController {
     private static final Handler H=new Handler(Looper.getMainLooper());
     private static final Object TOKEN=new Object();
@@ -22,10 +22,13 @@ public final class UnifiedSyncController {
     private static Context runContext;
     private static final String[] STAGE_NAMES={"街口","LINE Pay","Pi 拍錢包","Google Pay"};
     private static final String[] stageResults={"PENDING","PENDING","PENDING","PENDING"};
-    // Hard timeout for every source. If a source hangs it is skipped and the next one runs.
-    private static final long[] WINDOWS={90_000L,120_000L,90_000L,120_000L};
-    // Absolute safety watchdog: the phone must never stay in the sync chain indefinitely.
-    private static final long MAX_RUN_MS=8*60_000L;
+    // Google Pay needs substantially longer than the other sources because incomplete
+    // historical rows are opened one-by-one to backfill issuer/card/last4 details.
+    // Keep the other wallet limits unchanged but allow Google up to 5 minutes.
+    private static final long[] WINDOWS={90_000L,120_000L,90_000L,300_000L};
+    // Absolute safety watchdog. Even with the longer Google detail pass the phone can
+    // never remain in a wallet indefinitely; the whole chain is force-stopped at 12 min.
+    private static final long MAX_RUN_MS=12*60_000L;
     private static final long MIN_STAGE_MS=4500L,POLL_MS=1000L;
     private static final String SELF="com.bou.payhelper";
     private UnifiedSyncController(){}
@@ -46,8 +49,7 @@ public final class UnifiedSyncController {
         diagnostic=scheduled?"scheduled sync starting":"manual sync starting";
         SyncRunLogStore.start(runContext,scheduled,startedAt);
         H.removeCallbacksAndMessages(TOKEN);
-        // Independent total watchdog. It is removed automatically when the run finishes.
-        post(MAX_RUN_MS,()->hardAbort(service,"TOTAL_TIMEOUT_8_MIN"));
+        post(MAX_RUN_MS,()->hardAbort(service,"TOTAL_TIMEOUT_12_MIN"));
         startPreparedStage(runContext,service,0);
         return true;
     }
@@ -136,12 +138,12 @@ public final class UnifiedSyncController {
     }
 
     private static void hardAbort(PayAccessibilityService service,String reason){
-        synchronized(UnifiedSyncController.class){if(!running)return;running=false;stage=4;anyFailure=true;diagnostic="FAILED: "+reason;}
-        if(stage>=0&&stage<4&&"PENDING".equals(stageResults[stage]))setStageResult(stage,reason);
+        int abortedStage;
+        synchronized(UnifiedSyncController.class){if(!running)return;abortedStage=stage;running=false;stage=4;anyFailure=true;diagnostic="FAILED: "+reason;}
+        if(abortedStage>=0&&abortedStage<4&&"PENDING".equals(stageResults[abortedStage]))setStageResult(abortedStage,reason);
         try{GoogleWalletSyncControllerV3.stop(false);}catch(Throwable ignored){}
         PaymentSyncStateBridge.prepareHandoff(service);
-        if(runContext!=null)SyncRunLogStore.finish(runContext,"FAILED","整體同步超過 8 分鐘，已強制停止並返回手機桌面",System.currentTimeMillis());
-        // Safety first: do not leave a wallet glowing all night even if Pay Helper cannot resume.
+        if(runContext!=null)SyncRunLogStore.finish(runContext,"FAILED","整體同步超過 12 分鐘，已強制停止並返回手機桌面",System.currentTimeMillis());
         try{service.performGlobalAction(AccessibilityService.GLOBAL_ACTION_HOME);}catch(Throwable ignored){}
         H.removeCallbacksAndMessages(TOKEN);
     }
