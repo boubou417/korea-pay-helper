@@ -77,12 +77,12 @@ object GoogleWalletSyncControllerV74 {
         val pruned = GoogleWalletTransactionStore.pruneUnresolvedOlderThan(s, RECENT_DAYS)
         s.stopGoogleWalletDiagnostic(false)
         GoogleWalletDiagnosticStore.clear(s)
-        record(s, "v77-start", "existing=${GoogleWalletTransactionStore.load(s).size} dedup=$dedup pruned=$pruned cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
+        record(s, "v78-start", "existing=${GoogleWalletTransactionStore.load(s).size} dedup=$dedup pruned=$pruned cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
 
         val launch = s.packageManager.getLaunchIntentForPackage(WALLET)
-        if (launch == null) { record(s, "v77-launch-missing", ""); finish(true); return }
+        if (launch == null) { record(s, "v78-launch-missing", ""); finish(true); return }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
-        try { s.startActivity(launch) } catch (t: Throwable) { record(s, "v77-launch-error", t.message.orEmpty()) }
+        try { s.startActivity(launch) } catch (t: Throwable) { record(s, "v78-launch-error", t.message.orEmpty()) }
         schedule(1200)
     }
 
@@ -99,18 +99,18 @@ object GoogleWalletSyncControllerV74 {
     private fun safeTick() {
         val s = service ?: return
         try { tick(s) } catch (t: Throwable) {
-            record(s, "v77-error-state$state", "${t.javaClass.simpleName}:${t.message}")
+            record(s, "v78-error-state$state", "${t.javaClass.simpleName}:${t.message}")
             schedule(700)
         }
     }
 
     private fun tick(s: PayAccessibilityService) {
         if (!running) return
-        if (System.currentTimeMillis() - startedAt > 360_000L) { record(s, "v77-timeout", "keys=${unresolvedKeys(s)}"); finish(true); return }
+        if (System.currentTimeMillis() - startedAt > 360_000L) { record(s, "v78-timeout", "keys=${unresolvedKeys(s)}"); finish(true); return }
         val root = try { s.rootInActiveWindow } catch (_: Throwable) { null }
         if (root == null) { schedule(); return }
         val pkg = root.packageName?.toString().orEmpty()
-        if (pkg == SELF) { record(s, "v77-returned-to-app", "state=$state"); finish(false); return }
+        if (pkg == SELF) { record(s, "v78-returned-to-app", "state=$state"); finish(false); return }
         val accepted = if (state == DETAIL) pkg == WALLET || pkg == GMS else pkg == WALLET
         if (!accepted) { schedule(); return }
         when (state) {
@@ -124,7 +124,7 @@ object GoogleWalletSyncControllerV74 {
     private fun onHome(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
         cards = findCards(root)
         if (cards.isEmpty()) { schedule(600); return }
-        record(s, "v77-home", "cards=${cards.joinToString(",") { it.last4 }} cardUnresolved=${unresolvedCount(s)}")
+        record(s, "v78-home", "cards=${cards.joinToString(",") { it.last4 }} cardUnresolved=${unresolvedCount(s)}")
         state = OPEN_MORE
         schedule(900)
         tapText(s, root, "顯示更多", "home-more")
@@ -184,18 +184,18 @@ object GoogleWalletSyncControllerV74 {
             val node = findRow(root, candidate)
             if (node != null) {
                 val x = stored[candidate.fallbackKey]
-                record(s, "v77-force-detail", "${candidate.fallbackKey} detailChecked=${x?.detailChecked} bank=${x?.bank.orEmpty()} last4=${x?.cardLast4.orEmpty()} retry=${detailFailures[candidate.fallbackKey] ?: 0}")
+                record(s, "v78-force-detail", "${candidate.fallbackKey} detailChecked=${x?.detailChecked} bank=${x?.bank.orEmpty()} last4=${x?.cardLast4.orEmpty()} retry=${detailFailures[candidate.fallbackKey] ?: 0}")
                 pending = candidate
                 detailTry = 0
                 state = DETAIL
-                capture(s, root, "v77-before-detail-${safe(candidate.shop)}")
+                capture(s, root, "v78-before-detail-${safe(candidate.shop)}")
                 schedule(850)
                 tapNode(s, node, "detail-${safe(candidate.shop)}", true)
                 return
             }
             val failures = (detailFailures[candidate.fallbackKey] ?: 0) + 1
             detailFailures[candidate.fallbackKey] = failures
-            record(s, "v77-row-node-missing", "${candidate.fallbackKey} failures=$failures")
+            record(s, "v78-row-node-missing", "${candidate.fallbackKey} failures=$failures")
             if (failures >= MAX_DETAIL_RETRIES_PER_ROW) visited.add(candidate.fallbackKey)
         }
 
@@ -206,7 +206,7 @@ object GoogleWalletSyncControllerV74 {
         noMove = if (fp == lastFp) noMove + 1 else 0
         lastFp = fp
         val unresolved = unresolvedCount(s)
-        record(s, "v77-history-page$page", "rows=${rows.size} cardUnresolved=$unresolved knownPages=$knownPages noMove=$noMove stuckRecovery=$stuckScrollRecoveries")
+        record(s, "v78-history-page$page", "rows=${rows.size} cardUnresolved=$unresolved knownPages=$knownPages noMove=$noMove stuckRecovery=$stuckScrollRecoveries")
 
         if (unresolved == 0 && (knownPages >= 2 || noMove >= 3 || page >= MAX_PAGES)) {
             finish(true)
@@ -218,12 +218,12 @@ object GoogleWalletSyncControllerV74 {
                 stuckScrollRecoveries++
                 noMove = 0
                 page++
-                record(s, "v77-stuck-scroll-recovery", "attempt=$stuckScrollRecoveries unresolved=$unresolved keys=${unresolvedKeys(s)}")
+                record(s, "v78-stuck-scroll-recovery", "attempt=$stuckScrollRecoveries unresolved=$unresolved keys=${unresolvedKeys(s)}")
                 schedule(1200)
                 swipeUpStrong(s, "recovery-$stuckScrollRecoveries")
                 return
             }
-            record(s, "v77-stop-after-recovery", "unresolved=$unresolved keys=${unresolvedKeys(s)}")
+            record(s, "v78-stop-after-recovery", "unresolved=$unresolved keys=${unresolvedKeys(s)}")
             finish(true)
             return
         }
@@ -254,12 +254,12 @@ object GoogleWalletSyncControllerV74 {
                 if (cardComplete) {
                     visited.add(tx.fallbackKey)
                     detailFailures.remove(tx.fallbackKey)
-                    record(s, "v77-detail-complete", "${tx.fallbackKey} card=${c.name} last4=${c.last4} bank=$bank source=${m.source}")
+                    record(s, "v78-detail-complete", "${tx.fallbackKey} card=${c.name} last4=${c.last4} bank=$bank source=${m.source}")
                 } else {
                     val failures = (detailFailures[tx.fallbackKey] ?: 0) + 1
                     detailFailures[tx.fallbackKey] = failures
                     if (failures >= MAX_DETAIL_RETRIES_PER_ROW) visited.add(tx.fallbackKey)
-                    record(s, "v77-detail-incomplete", "${tx.fallbackKey} card=${c?.name.orEmpty()} last4=${c?.last4.orEmpty()} bank=$bank retry=$failures/$MAX_DETAIL_RETRIES_PER_ROW")
+                    record(s, "v78-detail-incomplete", "${tx.fallbackKey} card=${c?.name.orEmpty()} last4=${c?.last4.orEmpty()} bank=$bank retry=$failures/$MAX_DETAIL_RETRIES_PER_ROW vals=${vals.take(40).joinToString(" | ")}")
                 }
 
                 pending = null
@@ -275,7 +275,7 @@ object GoogleWalletSyncControllerV74 {
         if (pkg == WALLET && vals.any { it == tx.shop } && detailTry in listOf(3, 6, 9, 12)) {
             findRow(root, tx)?.let { row ->
                 val xf = when (detailTry) { 3 -> .72f; 6 -> .30f; 9 -> .86f; else -> .16f }
-                record(s, "v77-detail-navigation-retry", "${tx.fallbackKey} try=$detailTry x=$xf")
+                record(s, "v78-detail-navigation-retry", "${tx.fallbackKey} try=$detailTry x=$xf")
                 schedule(800)
                 tapAt(s, row, xf, "detail-retry-${safe(tx.shop)}-$detailTry")
                 return
@@ -287,7 +287,7 @@ object GoogleWalletSyncControllerV74 {
         val failures = (detailFailures[tx.fallbackKey] ?: 0) + 1
         detailFailures[tx.fallbackKey] = failures
         if (failures >= MAX_DETAIL_RETRIES_PER_ROW) visited.add(tx.fallbackKey)
-        record(s, "v77-detail-navigation-failed", "${tx.fallbackKey} attempts=$detailTry retry=$failures/$MAX_DETAIL_RETRIES_PER_ROW")
+        record(s, "v78-detail-navigation-failed", "${tx.fallbackKey} attempts=$detailTry retry=$failures/$MAX_DETAIL_RETRIES_PER_ROW")
         pending = null
         detailTry = 0
         state = HISTORY
@@ -304,7 +304,7 @@ object GoogleWalletSyncControllerV74 {
             keep.forEach { tx ->
                 val old = before["${tx.date.substringBefore(' ')}|${tx.amount}"]
                 if (old != null && old.shop != tx.shop && old.shop.trim().length <= 2 && tx.shop.trim().length > old.shop.trim().length) {
-                    record(s, "v77-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
+                    record(s, "v78-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
                 }
             }
         }
@@ -411,7 +411,7 @@ object GoogleWalletSyncControllerV74 {
         val txType = vals.firstOrNull { it == "使用手機購買" || it == "線上購物" || it.contains("感應付款") }.orEmpty()
         var vt = ""
         var vl = ""
-        val vr = Regex("(?i)(Mastercard|Visa|JCB|萬事達)\\s*••\\s*([0-9 ]{4,})")
+        val vr = Regex("(?i)(Mastercard|Visa|JCB|萬事達)[\\s\\u00a0\\u200b\\u200e\\u200f]*[•·●∙⋅‧・▪◦]{1,}[\\s\\u00a0\\u200b\\u200e\\u200f]*([0-9][0-9\\s\\u00a0\\u200b\\u200e\\u200f]{3,})")
         vals.forEach { v ->
             vr.find(v)?.let { mm ->
                 vt = normalizeCard(mm.groupValues[1])
@@ -419,39 +419,85 @@ object GoogleWalletSyncControllerV74 {
             }
         }
 
-        extractExplicitDetailCard(vals)?.let { return Meta(time, id, txType, vl, vt, it, "detail-bank-last4") }
+        extractExplicitDetailCard(vals)?.let { return Meta(time, id, txType, vl, vt, it, "detail-bank-last4-v78") }
 
-        val compact = vals.joinToString(" ").replace(" ", "")
-        cards.firstOrNull { compact.contains("••${it.last4}") }?.let { return Meta(time, id, txType, vl, vt, it, "explicit-wallet-last4") }
+        val compact = vals.joinToString(" ").replace(Regex("[\\s\\u00a0\\u200b\\u200e\\u200f]"), "")
+        cards.firstOrNull { compact.contains(it.last4) }?.let { return Meta(time, id, txType, vl, vt, it, "explicit-wallet-last4") }
         return Meta(time, id, txType, vl, vt, null, "")
     }
 
     private fun extractExplicitDetailCard(vals: List<String>): Card? {
+        val normalized = vals.map {
+            it.replace('\u00a0', ' ')
+                .replace("\u200b", "")
+                .replace("\u200e", "")
+                .replace("\u200f", "")
+                .trim()
+        }
+
         fun build(nameRaw: String, lastRaw: String): Card? {
             val last4 = lastRaw.filter { it.isDigit() }.takeLast(4)
             if (last4.length != 4) return null
-            val name = nameRaw.trim().trimEnd(':', '：')
+            val name = nameRaw.trim().trim(' ', ':', '：', '-', '–', '—', ',', '，')
             if (name.isBlank() || name.equals("Mastercard", true) || name.equals("Visa", true) || name.equals("JCB", true) || name == "萬事達") return null
-            val looksPhysical = inferBank(name).isNotBlank() || name.contains("銀行") || name.contains("信用卡") || name.contains("卡")
+            val bank = inferBank(name)
+            val looksPhysical = bank.isNotBlank() || name.contains("銀行") || name.contains("信用卡") || name.contains("鈦金") || name.contains("商旅卡")
             if (!looksPhysical) return null
             val type = normalizeCard(name)
             return Card(name, last4, if (type in setOf("Mastercard", "Visa", "JCB")) type else "")
         }
 
-        val sameLine = Regex("(.+?)\\s*[•·]{2}\\s*([0-9 ]{4,})$")
-        for (raw in vals) {
-            val m = sameLine.find(raw.trim()) ?: continue
+        // 1) Strongest/easiest case: issuer + card + last4 are exposed in one string.
+        // Accept multiple bullet-like Unicode characters and invisible spacing.
+        val sameLine = Regex("(.+?)[\\s\\u00a0\\u200b\\u200e\\u200f]*(?:[•·●∙⋅‧・▪◦]{1,}|(?:末四碼|末4碼|尾號|後四碼|末位數(?:號碼)?(?:為)?))[\\s:：\\u00a0\\u200b\\u200e\\u200f]*([0-9](?:[\\s\\u00a0\\u200b\\u200e\\u200f]*[0-9]){3})", RegexOption.IGNORE_CASE)
+        for (raw in normalized) {
+            val m = sameLine.find(raw) ?: continue
             build(m.groupValues[1], m.groupValues[2])?.let { return it }
         }
 
-        val lastOnly = Regex("^[•·]{2}\\s*([0-9 ]{4,})$")
-        for (i in vals.indices) {
-            val m = lastOnly.find(vals[i].trim()) ?: continue
-            val start = maxOf(0, i - 3)
-            for (j in i - 1 downTo start) {
-                build(vals[j], m.groupValues[1])?.let { return it }
+        // 2) Some GMS builds split the visual card chip into multiple accessibility nodes.
+        // Identify a unique issuer/card-name node and a unique explicit-last4 node anywhere
+        // on this transaction-detail page, then combine them. This deliberately ignores
+        // UUID digits and amount/time because last4 must be accompanied by bullets/labels.
+        val cardNameCandidates = normalized
+            .filter { inferBank(it).isNotBlank() && (it.contains("卡") || it.contains("銀行") || it.contains("鈦金") || it.contains("商旅")) }
+            .map { value ->
+                value.substringBefore("••")
+                    .substringBefore("··")
+                    .substringBefore("●●")
+                    .trim(' ', ':', '：', '-', '–', '—', ',', '，')
+            }
+            .filter { it.isNotBlank() }
+            .distinct()
+
+        val last4Candidates = LinkedHashSet<String>()
+        val explicitLast4 = Regex("(?:[•·●∙⋅‧・▪◦]{1,}|(?:末四碼|末4碼|尾號|後四碼|末位數(?:號碼)?(?:為)?))[\\s:：\\u00a0\\u200b\\u200e\\u200f]*([0-9](?:[\\s\\u00a0\\u200b\\u200e\\u200f]*[0-9]){3})", RegexOption.IGNORE_CASE)
+        normalized.forEach { raw ->
+            explicitLast4.findAll(raw).forEach { m ->
+                val x = m.groupValues[1].filter { it.isDigit() }.takeLast(4)
+                if (x.length == 4) last4Candidates.add(x)
             }
         }
+
+        if (cardNameCandidates.size == 1 && last4Candidates.size == 1) {
+            build(cardNameCandidates.first(), last4Candidates.first())?.let { return it }
+        }
+
+        // 3) Last resort for the exact Google Pay layout in the screenshot: if there is
+        // exactly one issuer/card-name on the detail page and exactly one standalone
+        // four-digit accessibility value near card-related text, accept it. UUID chunks,
+        // dates and amounts are excluded by requiring the original value to contain only
+        // four digits plus punctuation/spacing.
+        if (cardNameCandidates.size == 1) {
+            val standalone4 = normalized.mapNotNull { raw ->
+                val digits = raw.filter { it.isDigit() }
+                if (digits.length == 4 && raw.none { it.isLetter() } && !raw.contains(':') && !raw.contains('/') && !raw.contains('-')) digits else null
+            }.distinct()
+            if (standalone4.size == 1) {
+                build(cardNameCandidates.first(), standalone4.first())?.let { return it }
+            }
+        }
+
         return null
     }
 
@@ -622,13 +668,13 @@ object GoogleWalletSyncControllerV74 {
 
     private fun capture(s: PayAccessibilityService, root: AccessibilityNodeInfo, label: String) {
         try {
-            GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), root.packageName?.toString().orEmpty(), -770, "formal-sync-v77/$label", label, texts(root).joinToString("\n"), ""))
+            GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), root.packageName?.toString().orEmpty(), -780, "formal-sync-v78/$label", label, texts(root).joinToString("\n"), ""))
         } catch (_: Throwable) { }
     }
 
     private fun record(s: PayAccessibilityService, label: String, msg: String) {
         try {
-            GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), WALLET, -771, "formal-sync-v77/$label", label, msg, ""))
+            GoogleWalletDiagnosticStore.add(s, GoogleWalletDiagnosticCapture(System.currentTimeMillis(), WALLET, -781, "formal-sync-v78/$label", label, msg, ""))
         } catch (_: Throwable) { }
     }
 
@@ -638,11 +684,11 @@ object GoogleWalletSyncControllerV74 {
         scheduled = false
         handler.removeCallbacks(runner)
         if (s != null) {
-            record(s, "v77-finish", "detail=$detailCount navigationFailures=$navFailCount total=${GoogleWalletTransactionStore.load(s).size} cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
+            record(s, "v78-finish", "detail=$detailCount navigationFailures=$navFailCount total=${GoogleWalletTransactionStore.load(s).size} cardUnresolved=${unresolvedCount(s)} keys=${unresolvedKeys(s)}")
             val p = s.getSharedPreferences("v241", 0)
             val tm = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
             val old = p.getString("log", "") ?: ""
-            p.edit().putString("log", ("[$tm] Google Wallet V7.7 finish cardUnresolved=${unresolvedCount(s)}\n" + old).take(40000)).apply()
+            p.edit().putString("log", ("[$tm] Google Wallet V7.8 finish cardUnresolved=${unresolvedCount(s)}\n" + old).take(40000)).apply()
             if (returnToApp) {
                 try {
                     s.packageManager.getLaunchIntentForPackage(SELF)?.let {
