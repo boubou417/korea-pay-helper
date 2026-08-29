@@ -24,8 +24,8 @@ android {
         applicationId "com.bou.payhelper"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 6027
-        versionName "6.1.9-foreground-activity-handoff-test"
+        versionCode 6028
+        versionName "6.2.0-accessibility-back-handoff-test"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions { ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~' }
     }
