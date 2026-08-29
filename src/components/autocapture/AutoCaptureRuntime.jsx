@@ -12,12 +12,11 @@ export default function AutoCaptureRuntime(){
     if(!native)return;
     ensureNightlySync().catch(console.warn);
 
-    // A scheduled run imports first, reloads so React state sees the new records,
-    // then this fresh mount sends Android HOME. This leaves the phone on its launcher
-    // so the normal screen timeout can sleep it.
+    // After a scheduled run has already imported and reloaded, move from Pay Helper
+    // to the Android launcher. The phone's own screen timeout can then sleep normally.
     if(sessionStorage.getItem(NIGHTLY_HOME_FLAG)==='1'){
       sessionStorage.removeItem(NIGHTLY_HOME_FLAG);
-      window.setTimeout(()=>AutoCapture.finishScheduledRun().catch(console.warn),700);
+      window.setTimeout(()=>AutoCapture.goDeviceHome().catch(console.warn),700);
     }
 
     const poll=async()=>{
@@ -25,14 +24,19 @@ export default function AutoCaptureRuntime(){
       try{
         const status=await AutoCapture.getStatus();
         if(status?.unifiedSyncRunning){wasRunning.current=true;return;}
-        if(!wasRunning.current)return;
+
+        // A nightly run can spend almost all of its time with the WebView backgrounded,
+        // so JS may never observe running=true. Native stage=4 is therefore also a
+        // completion signal and guarantees the final import still happens.
+        const completed=wasRunning.current || Number(status?.unifiedSyncStage)===4;
+        if(!completed)return;
+
         wasRunning.current=false;
         finishing.current=true;
         const scheduled=Boolean(status?.unifiedSyncScheduledRun);
         await importCapturedTransactions();
-        // Always reopen the refreshed app on Taiwan/Home so newly imported rows and
-        // updated reward usage are immediately reflected in React state.
         localStorage.setItem('country','TW');
+        await AutoCapture.acknowledgeImportedRun();
         if(scheduled)sessionStorage.setItem(NIGHTLY_HOME_FLAG,'1');
         window.setTimeout(()=>window.location.reload(),180);
       }catch(error){
