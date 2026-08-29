@@ -2,19 +2,14 @@ import React from 'react';
 import SurfaceCard from '../components/common/SurfaceCard';
 import AppButton from '../components/common/AppButton';
 import SectionHeading from '../components/common/SectionHeading';
-import RecommendationCard from '../components/home/RecommendationCard';
-import DashboardSummary from '../components/home/DashboardSummary';
 import AmountInputCard from '../components/home/AmountInputCard';
 import StrategyCard from '../components/strategy/StrategyCard';
 import PaymentList from '../components/payment/PaymentList';
 
 export default function HomePage({
-  recommendedPayment,
   settings,
-  history,
   currencySymbol,
   darkMode,
-  setTab,
   amount,
   setAmount,
   note,
@@ -34,21 +29,6 @@ export default function HomePage({
 }) {
   return (
     <>
-      <RecommendationCard
-        payment={recommendedPayment}
-        exchangeRate={settings.exchangeRate}
-        currencySymbol={currencySymbol}
-        darkMode={darkMode}
-      />
-
-      <DashboardSummary
-        payments={settings.payments}
-        history={history}
-        currencySymbol={currencySymbol}
-        darkMode={darkMode}
-        onOpenHistory={() => setTab('history')}
-      />
-
       <AmountInputCard
         currencySymbol={currencySymbol}
         amount={amount}
