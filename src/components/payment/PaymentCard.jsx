@@ -26,53 +26,54 @@ export default function PaymentCard({
 }) {
   const rate = Number(exchangeRate || 0);
   const used = Number(payment.used || 0);
-  const limit =
-    payment.spendLimit ||
-    (payment.bonusRate > 0
-      ? payment.bonusLimit / payment.bonusRate
-      : 999999);
+  const spendLimit = Number(payment.spendLimit || 0);
+  const bonusLimit = Number(payment.bonusLimit || 0);
+  const bonusRate = Number(payment.bonusRate || 0);
+  // 空白/0 代表沒有設定回饋上限；不要用 0 元或虛擬大數字表示。
+  const hasSpendLimit = spendLimit > 0;
+  const hasBonusLimit = bonusLimit > 0 && bonusRate > 0;
+  const hasLimit = hasSpendLimit || hasBonusLimit;
+  const limit = hasSpendLimit ? spendLimit : (hasBonusLimit ? bonusLimit / bonusRate : 0);
 
-  const remain = Math.max(limit - used, 0);
+  const remain = hasLimit ? Math.max(limit - used, 0) : 0;
   const remainLocal = rate > 0 ? Math.floor(remain / rate) : 0;
-  const percentRaw = limit > 0 ? (used / limit) * 100 : 0;
-  const percent = Math.min(100, Math.round(percentRaw * 10) / 10);
+  const percentRaw = hasLimit && limit > 0 ? (used / limit) * 100 : 0;
+  const percent = hasLimit ? Math.min(100, Math.round(percentRaw * 10) / 10) : 0;
 
-  const earnedBonusUsed = Math.min(
-    used * Number(payment.bonusRate || 0),
-    Number(payment.bonusLimit || 0)
-  );
+  const earnedBonusUsed = hasBonusLimit
+    ? Math.min(used * bonusRate, bonusLimit)
+    : used * bonusRate;
   const earned = Math.floor(
     used * Number(payment.baseRate || 0) + earnedBonusUsed
   );
-  const bonusRemain = Math.round(
-    Math.max(Number(payment.bonusLimit || 0) - earnedBonusUsed, 0)
-  );
-  const spendRemain =
-    payment.bonusRate > 0 ? Math.floor(bonusRemain / payment.bonusRate) : 0;
+  const bonusRemain = hasBonusLimit
+    ? Math.round(Math.max(bonusLimit - earnedBonusUsed, 0))
+    : 0;
+  const spendRemain = hasBonusLimit ? Math.floor(bonusRemain / bonusRate) : 0;
   const spendRemainLocal = rate > 0 ? Math.floor(spendRemain / rate) : 0;
 
   let tone = 'success';
-  let hint = '回饋額度充足';
+  let hint = hasLimit ? '回饋額度充足' : '♾️ 回饋無上限';
   let accentText = darkMode ? 'text-emerald-300' : 'text-emerald-600';
   let surface = darkMode
     ? 'bg-gray-800/90 border-gray-700'
     : 'bg-white border-gray-200';
 
-  if (percent >= 90) {
+  if (hasLimit && percent >= 90) {
     tone = 'danger';
     hint = '⚠️ 加碼即將用完';
     accentText = darkMode ? 'text-rose-300' : 'text-rose-600';
     surface = darkMode
       ? 'bg-rose-950/50 border-rose-800'
       : 'bg-rose-50 border-rose-200';
-  } else if (percent >= 70) {
+  } else if (hasLimit && percent >= 70) {
     tone = 'warning';
     hint = '⏳ 接近上限，建議優先使用';
     accentText = darkMode ? 'text-amber-300' : 'text-amber-600';
     surface = darkMode
       ? 'bg-amber-950/40 border-amber-800'
       : 'bg-amber-50 border-amber-200';
-  } else if (payment.type === 'card' && percent < 30) {
+  } else if (hasLimit && payment.type === 'card' && percent < 30) {
     hint = '🔥 回饋空間充足，適合優先刷';
   }
 
@@ -97,32 +98,42 @@ export default function PaymentCard({
               <div className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
                 {payment.type === 'card' ? '信用卡' : '行動支付'} · 總回饋約{' '}
                 {formatPercent(
-                  Number(payment.baseRate || 0) + Number(payment.bonusRate || 0)
+                  Number(payment.baseRate || 0) + bonusRate
                 )}
               </div>
             </div>
           </div>
         </div>
 
-        <div className={`shrink-0 text-right ${accentText}`}>
-          <div className="text-xl font-black">{formatUsagePercent(percent)}%</div>
-          <div className="text-[10px] font-medium">額度使用</div>
-        </div>
+        {hasLimit ? (
+          <div className={`shrink-0 text-right ${accentText}`}>
+            <div className="text-xl font-black">{formatUsagePercent(percent)}%</div>
+            <div className="text-[10px] font-medium">額度使用</div>
+          </div>
+        ) : (
+          <div className={`shrink-0 text-right ${accentText}`}>
+            <div className="text-sm font-extrabold">無上限</div>
+          </div>
+        )}
       </div>
 
-      <div className="mt-4">
-        <PaymentProgress value={percent} tone={tone} darkMode={darkMode} />
-      </div>
-
-      <div className="mt-4 grid grid-cols-2 gap-2">
-        <div className={`rounded-2xl p-3 ${darkMode ? 'bg-black/15' : 'bg-gray-50'}`}>
-          <div className={`text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
-            剩餘可刷
-          </div>
-          <div className="mt-0.5 truncate text-base font-extrabold">
-            {currencySymbol}{remainLocal.toLocaleString()}
-          </div>
+      {hasLimit && (
+        <div className="mt-4">
+          <PaymentProgress value={percent} tone={tone} darkMode={darkMode} />
         </div>
+      )}
+
+      <div className={`mt-4 grid ${hasLimit ? 'grid-cols-2' : 'grid-cols-1'} gap-2`}>
+        {hasLimit && (
+          <div className={`rounded-2xl p-3 ${darkMode ? 'bg-black/15' : 'bg-gray-50'}`}>
+            <div className={`text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+              剩餘可刷
+            </div>
+            <div className="mt-0.5 truncate text-base font-extrabold">
+              {currencySymbol}{remainLocal.toLocaleString()}
+            </div>
+          </div>
+        )}
         <div className={`rounded-2xl p-3 ${darkMode ? 'bg-black/15' : 'bg-gray-50'}`}>
           <div className={`text-[11px] ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
             已拿回饋
@@ -133,20 +144,20 @@ export default function PaymentCard({
         </div>
       </div>
 
-      <div className={`mt-3 rounded-2xl px-3 py-2 text-xs ${darkMode ? 'bg-black/10 text-gray-300' : 'bg-gray-50 text-gray-600'}`}>
-        <div className="flex justify-between gap-3">
-          <span>加碼剩餘</span>
-          <span className="font-semibold">NT${bonusRemain.toLocaleString()}</span>
-        </div>
-        {payment.bonusRate > 0 && (
+      {hasBonusLimit && (
+        <div className={`mt-3 rounded-2xl px-3 py-2 text-xs ${darkMode ? 'bg-black/10 text-gray-300' : 'bg-gray-50 text-gray-600'}`}>
+          <div className="flex justify-between gap-3">
+            <span>加碼剩餘</span>
+            <span className="font-semibold">NT${bonusRemain.toLocaleString()}</span>
+          </div>
           <div className="mt-1 flex justify-between gap-3">
             <span>依加碼額度約可再刷</span>
             <span className="font-semibold text-purple-500">
               {currencySymbol}{spendRemainLocal.toLocaleString()}
             </span>
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
       <div className={`mt-3 text-xs font-semibold ${accentText}`}>{hint}</div>
 
