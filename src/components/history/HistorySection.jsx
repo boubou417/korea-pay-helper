@@ -10,6 +10,7 @@ function Card({ children, darkMode }) {
 export default function HistorySection({ history, payments, onUndo, currencySymbol, darkMode }) {
   const [filterCategory, setFilterCategory] = useState('全部');
   const [filterCycle, setFilterCycle] = useState('全部');
+  const [filterPayment, setFilterPayment] = useState('全部');
   const [currentPage, setCurrentPage] = useState(1);
   const [pageInput, setPageInput] = useState('1');
   const PAGE_SIZE = 5;
@@ -28,11 +29,19 @@ export default function HistorySection({ history, payments, onUndo, currencySymb
     return `${bank} ${name}`;
   };
   const paymentChannel = item => {
-    if (item?.autoCaptureKey) return item.sourceLabel || item.paymentMethod || '自動擷取';
+    if (item?.autoCaptureKey) {
+      const src = String(item.source || '').toUpperCase();
+      if (src === 'GOOGLE_WALLET') return 'Google Pay';
+      if (src === 'LINE_PAY') return 'LINE Pay';
+      if (src === 'JKOPAY') return '街口';
+      if (src === 'PI_WALLET') return 'Pi';
+      return item.sourceLabel || item.paymentMethod || '自動擷取';
+    }
     const payment = getPayment(item);
     if (payment?.type === 'card') return '信用卡';
-    if (payment?.type) return '行動支付';
-    return item?.paymentMethod || '';
+    if (item?.paymentMethod) return item.paymentMethod;
+    if (payment?.type) return '其他';
+    return '其他';
   };
 
   const getCycleType = item => {
@@ -66,22 +75,26 @@ export default function HistorySection({ history, payments, onUndo, currencySymb
     if(filterCategory!=='全部'&&cat!==filterCategory)return false;
     const cycleType=getCycleType(item);
     if(filterCycle!=='全部'&&cycleType!==filterCycle)return false;
+    const channel=paymentChannel(item);
+    if(filterPayment!=='全部'&&channel!==filterPayment)return false;
     return true;
-  }), [history,payments,filterCategory,filterCycle]);
+  }), [history,payments,filterCategory,filterCycle,filterPayment]);
 
   const totalPages=Math.max(1,Math.ceil(filteredHistory.length/PAGE_SIZE));
-  useEffect(()=>{setCurrentPage(1);setPageInput('1');},[filterCategory,filterCycle]);
+  useEffect(()=>{setCurrentPage(1);setPageInput('1');},[filterCategory,filterCycle,filterPayment]);
   useEffect(()=>{if(currentPage>totalPages)setCurrentPage(totalPages);setPageInput(String(Math.min(currentPage,totalPages)));},[currentPage,totalPages]);
   const jumpToPage=()=>{const n=Number.parseInt(pageInput,10);if(!Number.isFinite(n)){setPageInput(String(currentPage));return;}const target=Math.min(totalPages,Math.max(1,n));setCurrentPage(target);setPageInput(String(target));};
 
   const pageItems=filteredHistory.slice((currentPage-1)*PAGE_SIZE,currentPage*PAGE_SIZE);
   const grouped={};pageItems.forEach(({item,originalIndex})=>{const d=new Date(item.time);const key=`${d.getFullYear()}-${d.getMonth()+1}`;(grouped[key]||(grouped[key]=[])).push({item,originalIndex});});
   const list=Object.entries(grouped);const allCategories=['全部',...Array.from(new Set(history.map(h=>h.category||'未分類')))];
+  const paymentFilters=['全部','Google Pay','LINE Pay','街口','Pi','信用卡','其他'];
   const pageNumbers=[];const startPage=Math.max(1,currentPage-2);const endPage=Math.min(totalPages,startPage+4);const adjustedStart=Math.max(1,endPage-4);for(let page=adjustedStart;page<=endPage;page++)pageNumbers.push(page);
 
   return <Card darkMode={darkMode}>
     <div className="font-bold mb-2">歷史記錄</div>
     <div className="flex gap-2 mb-2 flex-wrap">{['全部','本期','上期','未判定','更早'].map(c=><button key={c} onClick={()=>setFilterCycle(c)} className={`px-2 py-1 text-xs rounded-full ${filterCycle===c?'bg-purple-500 text-white':darkMode?'bg-gray-700 text-gray-200':'bg-gray-200 text-gray-700'}`}>{c}</button>)}</div>
+    <div className="flex gap-2 mb-2 flex-wrap">{paymentFilters.map(c=><button key={c} onClick={()=>setFilterPayment(c)} className={`px-2 py-1 text-xs rounded-full ${filterPayment===c?'bg-emerald-500 text-white':darkMode?'bg-gray-700 text-gray-200':'bg-gray-200 text-gray-700'}`}>{c}</button>)}</div>
     <div className="flex flex-wrap gap-2 mb-3">{allCategories.map(c=><button key={c} onClick={()=>setFilterCategory(c)} className={`px-2 py-1 text-xs rounded-full ${filterCategory===c?'bg-blue-500 text-white':darkMode?'bg-gray-700 text-gray-200':'bg-gray-200 text-gray-700'}`}>{c}</button>)}</div>
     {filteredHistory.length===0&&<div className={`py-8 text-center text-sm ${darkMode?'text-gray-400':'text-gray-500'}`}>沒有符合條件的記錄</div>}
     {list.map(([month,items])=><div key={month} className="mb-3"><div className={`text-sm font-semibold mb-1 ${darkMode?'text-gray-300':'text-gray-700'}`}>📅 {month}</div>{items.map(({item:h,originalIndex})=>{const cycleText=getCycleText(h);const cycleType=getCycleType(h);const channel=paymentChannel(h);return <div key={`${h.time}-${originalIndex}`} className={`mb-2 p-3 rounded-xl ${h.name==='現金'?(darkMode?'bg-green-900 text-green-200':'bg-green-50 text-green-800'):(darkMode?'bg-gray-700 text-gray-200':'bg-gray-50 text-gray-800')}`}>
