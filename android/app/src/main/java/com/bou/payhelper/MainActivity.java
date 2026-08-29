@@ -48,10 +48,20 @@ public class MainActivity extends BridgeActivity {
         if (UnifiedSyncController.isRunning()) return;
         PayAccessibilityService service = PayAccessibilityService.Companion.getInstance();
         if (service != null) {
-            UnifiedSyncController.start(getApplicationContext(), service, true);
+            boolean started=UnifiedSyncController.start(getApplicationContext(), service, true);
+            if(!started) SyncRunLogStore.failedToStart(getApplicationContext(),"02:00 自動同步無法啟動：已有同步正在執行");
             return;
         }
-        if (attempt < 8) handler.postDelayed(() -> startNightlyWhenServiceReady(attempt + 1), 500L);
+        if (attempt < 12) {
+            handler.postDelayed(() -> startNightlyWhenServiceReady(attempt + 1), 500L);
+        } else {
+            SyncRunLogStore.failedToStart(getApplicationContext(),"02:00 自動同步失敗：無障礙同步服務未連線");
+            // Do not leave Pay Helper awake when the scheduled job cannot even start.
+            try {
+                Intent home=new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                startActivity(home);
+            } catch(Throwable ignored) {}
+        }
     }
 
     public static boolean launchUnifiedStageFromForeground(int stage) {
