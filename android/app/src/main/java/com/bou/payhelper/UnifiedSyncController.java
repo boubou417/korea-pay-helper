@@ -21,7 +21,7 @@ public final class UnifiedSyncController {
     private static final String SELF="com.bou.payhelper";
     private UnifiedSyncController(){}
     public static synchronized boolean isRunning(){return running;} public static synchronized int getStage(){return stage;} public static synchronized long getStartedAt(){return startedAt;} public static synchronized boolean isScheduledRun(){return scheduledRun;} public static synchronized String getDiagnostic(){return diagnostic;}
-    public static synchronized void markScheduledCompletionHandled(){scheduledRun=false;if(!running&&stage==4)diagnostic="scheduled sync imported; device home requested";}
+    public static synchronized void acknowledgeImportedRun(){if(!running){stage=-1;scheduledRun=false;diagnostic="sync imported";}}
     private static synchronized void diag(String s){diagnostic=s;}
     public static synchronized boolean start(Context c,PayAccessibilityService service,boolean scheduled){if(running||service==null)return false;running=true;scheduledRun=scheduled;startedAt=System.currentTimeMillis();stage=-1;diagnostic=scheduled?"scheduled sync starting":"manual sync starting";H.removeCallbacksAndMessages(TOKEN);startPreparedStage(c.getApplicationContext(),service,0);return true;}
     private static void post(long ms,Runnable r){H.postAtTime(r,TOKEN,SystemClock.uptimeMillis()+ms);}
