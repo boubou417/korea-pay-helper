@@ -137,9 +137,6 @@
         },null)
     }
 
-    // Unified sync handoff API. The AccessibilityService owns the actual app switch:
-    // Android may defer a background startActivity issued by the Pay Helper app process,
-    // while AccessibilityService can perform HOME + launch as part of the automation flow.
     fun isJkoSyncRunningForHandoff():Boolean = running
     fun isLinePaySyncRunningForHandoff():Boolean = linePayFormalMode
     fun isPiSyncRunningForHandoff():Boolean = piFormalMode
@@ -163,27 +160,50 @@
         log("↪ Unified sync handoff：已釋放上一個支付來源的同步狀態")
     }
 
+    private fun launchPackageForUnifiedSync(primary:String, fallback:String?=null, requestCode:Int):Boolean{
+        var pkg=primary
+        var launch=packageManager.getLaunchIntentForPackage(primary)
+        if(launch==null && fallback!=null){ pkg=fallback; launch=packageManager.getLaunchIntentForPackage(fallback) }
+        if(launch==null){ log("⚠ Unified sync 找不到 App：$primary / ${fallback.orEmpty()}"); return false }
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+        return try{
+            val pi=PendingIntent.getActivity(this,requestCode,launch,PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            if(Build.VERSION.SDK_INT>=34){
+                val opts=ActivityOptions.makeBasic()
+                opts.setPendingIntentBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                opts.setPendingIntentCreatorBackgroundActivityStartMode(ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED)
+                pi.send(this,0,null,null,null,null,opts.toBundle())
+            }else pi.send()
+            log("✓ Unified sync BAL launch sent：$pkg active=${activePackageForUnifiedSync()}")
+            true
+        }catch(t:Throwable){
+            log("⚠ Unified sync BAL launch 失敗：$pkg ${t.javaClass.simpleName} ${t.message.orEmpty()}")
+            false
+        }
+    }
+
     fun startLinePayForUnifiedSync(){
         forceStopPaymentSyncForHandoff()
-        log("↪ Unified sync：準備切換到 LINE Pay；active=${activePackageForUnifiedSync()}")
-        performGlobalAction(GLOBAL_ACTION_HOME)
+        log("↪ Unified sync：啟動 LINE Pay；active=${activePackageForUnifiedSync()}")
+        startLinePaySync()
         h.postDelayed({
-            startLinePaySync()
-            h.postDelayed({
-                if(linePayFormalMode){
-                    autoNavigateLinePay()
-                    scheduleLinePayFormal(120)
-                    log("↪ Unified sync：LINE Pay 已啟動並補觸發導覽；active=${activePackageForUnifiedSync()}")
-                }
-            },1400)
-        },450)
+            val ok=launchPackageForUnifiedSync(LINE_APP,LINE_PAY,7101)
+            log("↪ Unified sync：LINE BAL launch=$ok active=${activePackageForUnifiedSync()}")
+        },180)
+        h.postDelayed({
+            if(linePayFormalMode){
+                autoNavigateLinePay()
+                scheduleLinePayFormal(120)
+                log("↪ Unified sync：LINE 導覽補觸發；active=${activePackageForUnifiedSync()}")
+            }
+        },1500)
     }
 
     fun startPiForUnifiedSync(){
         forceStopPaymentSyncForHandoff()
-        log("↪ Unified sync：準備切換到 Pi；active=${activePackageForUnifiedSync()}")
-        performGlobalAction(GLOBAL_ACTION_HOME)
-        h.postDelayed({ startPiSync() },450)
+        log("↪ Unified sync：啟動 Pi；active=${activePackageForUnifiedSync()}")
+        startPiSync()
+        h.postDelayed({ launchPackageForUnifiedSync(PI_WALLET,null,7102) },180)
     }
 
     private fun finish(){
