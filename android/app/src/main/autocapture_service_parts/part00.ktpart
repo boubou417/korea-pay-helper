@@ -60,8 +60,6 @@ class PayAccessibilityService : AccessibilityService() {
     private var revisitPass=0
     private var rewindStable=0
     private var rewindLastSignature=""
-    // V2.41 incremental-sync state. Snapshot existing keys before opening JKOS so
-    // we can stop as soon as the list has crossed from new rows into already-known rows.
     private val knownAtStart=HashSet<String>()
     private var repairMode=false
     private var newTransactionsThisRun=0
@@ -91,28 +89,19 @@ class PayAccessibilityService : AccessibilityService() {
     private var linePayDetailClickedAt=0L
     private var linePayDetailParseAttempts=0
     private var linePayReturnPending=false
-    // V2.41: dedicated LINE Pay history is a LIFF/WebView. During navigation the
-    // WebView may expose an empty accessibility tree for several seconds, so keep
-    // a loading state instead of falling back to the LINE Pay home preview.
     private var linePayHistoryOpenedAt=0L
     private var linePayHistoryEmptyPolls=0
     private var linePayHistoryLiffSeen=false
     private var linePayHistoryReopenAttempts=0
     private var linePayHistoryLastCaptureAt=0L
-    // V2.41 page/detail flow stabilization
     private var linePayLastProcessedPageFingerprint=""
     private var linePayLastProcessedPageAt=0L
     private var linePayDetailSuccessCommitted=false
     private var linePayOlderRangeOpened=false
-    // V2.41: quick mode is for daily use; full mode is for first-time/history repair.
     private var linePayFullHistoryMode=false
-    // V2.41 Pi Wallet diagnostic state. First pass intentionally captures real UI/tree
-    // instead of guessing resource IDs or transaction structure.
     private var piDiagnosticRunning=false
     private var lastPiCaptureAt=0L
     private var lastPiSignature=""
-    // V2.41 Pi Wallet formal quick-sync state. Pi exposes a native RecyclerView
-    // with stable row IDs, so daily sync can be much simpler than LINE Pay LIFF.
     private var piFormalMode=false
     private var piFormalScheduled=false
     private var piNavStage=0
@@ -123,16 +112,10 @@ class PayAccessibilityService : AccessibilityService() {
     private var piConsecutiveKnownPages=0
     private var piPage=0
     private var piLastPageFingerprint=""
-    // V2.41: guard the short transition between list -> detail -> list.
-    // Accessibility can report the old list for a moment after ACTION_CLICK; without
-    // these flags the same transaction may be clicked repeatedly before detail opens.
     private var piDetailOpening=false
     private var piReturnPending=false
     private val piFailedDetailKeys=HashSet<String>()
     private val piKnownAtStart=HashSet<String>()
-    // Pay Helper integration: Google Wallet transaction-history diagnostic.
-    // Google Wallet exposes a dedicated transaction list, but resource IDs / row structure
-    // vary by app version and account. Capture the real tree first, then promote to formal sync.
     private var googleWalletDiagnosticRunning=false
     private var lastGoogleWalletCaptureAt=0L
     private var lastGoogleWalletSignature=""
@@ -154,30 +137,59 @@ class PayAccessibilityService : AccessibilityService() {
                 if(linePayFormalMode) scheduleLinePayFormal(180)
             }, 220)
         }
-        if(piDiagnosticRunning && pkg==PI_WALLET) {
-            h.postDelayed({ capturePiDiagnostic(e) }, 220)
-        }
+        if(piDiagnosticRunning && pkg==PI_WALLET) h.postDelayed({ capturePiDiagnostic(e) },220)
         if(piFormalMode && pkg==PI_WALLET) schedulePiFormal(180)
-        if(googleWalletDiagnosticRunning && pkg==GOOGLE_WALLET) {
-            h.postDelayed({ captureGoogleWalletDiagnostic(e) }, 220)
-        }
+        if(googleWalletDiagnosticRunning && pkg==GOOGLE_WALLET) h.postDelayed({ captureGoogleWalletDiagnostic(e) },220)
     }
 
     fun startGoogleWalletDiagnostic(){
-        if(running || linePayFormalMode || piFormalMode){
-            log("⚠ 其他支付同步進行中，請完成後再啟動 Google Wallet 診斷")
-            return
-        }
+        if(running || linePayFormalMode || piFormalMode){ log("⚠ 其他支付同步進行中，請完成後再啟動 Google Wallet 診斷"); return }
         googleWalletDiagnosticRunning=true
         lastGoogleWalletCaptureAt=0L
         lastGoogleWalletSignature=""
         GoogleWalletDiagnosticStore.clear(this)
         log("=== Pay Helper Google Wallet 交易紀錄診斷開始：請進入『查看更多交易』並點開一筆交易 ===")
         val launch=packageManager.getLaunchIntentForPackage(GOOGLE_WALLET)
-        if(launch==null){
-            googleWalletDiagnosticRunning=false
-            log("⚠ 找不到 Google Wallet App；package=$GOOGLE_WALLET")
-            return
-        }
+        if(launch==null){ googleWalletDiagnosticRunning=false; log("⚠ 找不到 Google Wallet App；package=$GOOGLE_WALLET"); return }
         launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
         startActivity(launch)
+        h.postDelayed({ captureGoogleWalletDiagnostic(null) },1200)
+    }
+
+    fun stopGoogleWalletDiagnostic(returnToApp:Boolean=true){
+        googleWalletDiagnosticRunning=false
+        log("=== Pay Helper Google Wallet 交易紀錄診斷停止 ===")
+        if(returnToApp){
+            packageManager.getLaunchIntentForPackage(SELF)?.let{
+                it.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                startActivity(it)
+            }
+        }
+    }
+
+    private fun captureGoogleWalletDiagnostic(e:AccessibilityEvent?){
+        if(!googleWalletDiagnosticRunning) return
+        val root=rootInActiveWindow ?: return
+        val pkg=root.packageName?.toString().orEmpty()
+        if(pkg!=GOOGLE_WALLET) return
+        val visible=visibleTexts(root).joinToString("\n")
+        val tree=dumpTree(root,650).take(40000)
+        val signature=(visible+"\n"+tree).take(60000)
+        val now=System.currentTimeMillis()
+        if(signature==lastGoogleWalletSignature && now-lastGoogleWalletCaptureAt<1200) return
+        lastGoogleWalletSignature=signature
+        lastGoogleWalletCaptureAt=now
+        GoogleWalletDiagnosticStore.add(this, GoogleWalletDiagnosticCapture(
+            time=now, packageName=pkg, eventType=e?.eventType ?: 0,
+            eventClass=e?.className?.toString().orEmpty(),
+            eventText=e?.text?.joinToString(" | ").orEmpty(),
+            visibleText=visible, tree=tree
+        ))
+        log("Google Wallet 診斷已保存畫面：title=[${e?.text?.joinToString(" | ").orEmpty()}]")
+    }
+
+    private fun scheduleLinePayFormal(delayMs:Long=220L){
+        if(!linePayFormalMode) return
+        if(linePayFormalScheduled) return
+        linePayFormalScheduled=true
+        h.postDelayed(linePayFormalRunnable,delayMs)
