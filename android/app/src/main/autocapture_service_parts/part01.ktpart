@@ -1,0 +1,171 @@
+    }
+
+    fun startLinePayDiagnostic(){
+        linePayFormalMode=false
+        if(running){ log("⚠ 街口同步進行中，請完成後再啟動 LINE Pay 診斷"); return }
+        linePayDiagnosticRunning=true
+        lastLinePayCaptureAt=0L; lastLinePaySignature=""
+        lineNavStage=0; lineNavAttempts=0; lineNavLastActionAt=0L
+        LinePayDiagnosticStore.clear(this)
+        log("=== V2.41 LINE 內建 LINE Pay 診斷開始：LINE→錢包→LINE Pay→交易紀錄 ===")
+        launchLineForPay()
+    }
+
+    fun startLinePaySync(){ startLinePaySyncInternal(fullHistory=false) }
+
+    fun startLinePayFullHistorySync(){ startLinePaySyncInternal(fullHistory=true) }
+
+    private fun startLinePaySyncInternal(fullHistory:Boolean){
+        if(running || piFormalMode){ log("⚠ 其他支付同步進行中，請完成後再同步 LINE Pay"); return }
+        linePayFullHistoryMode=fullHistory
+        linePayFormalMode=true
+        linePayDiagnosticRunning=true
+        lastLinePayCaptureAt=0L; lastLinePaySignature=""
+        lineNavStage=0; lineNavAttempts=0; lineNavLastActionAt=0L
+        linePayHistoryEntered=false; linePayHistoryPage=0; linePayHistoryNoMove=0
+        linePayHistoryScrollInFlight=false; linePayHistoryBeforeScrollSignature=""; linePayHistoryFallbackUsed=false
+        linePayConsecutiveKnownPages=0; linePayKnownAtStart.clear()
+        val cleaned=LinePayTransactionStore.sanitize(this)
+        if(cleaned>0) log("✓ V2.41 LINE Pay 舊錯資料清理：移除=$cleaned")
+        val old=LinePayTransactionStore.load(this)
+        old.forEach{ linePayKnownAtStart.add(it.key) }
+        linePayRepairMode=fullHistory && old.any{!it.detailChecked}
+        linePayNewThisRun=0; linePayDetailsThisRun=0
+        linePayCurrentDetailKey=""; linePayDetailClickedAt=0L; linePayDetailParseAttempts=0; linePayReturnPending=false
+        linePayHistoryOpenedAt=0L; linePayHistoryEmptyPolls=0; linePayHistoryLiffSeen=false; linePayHistoryReopenAttempts=0; linePayHistoryLastCaptureAt=0L
+        linePayLastProcessedPageFingerprint=""; linePayLastProcessedPageAt=0L
+        linePayDetailSuccessCommitted=false; linePayOlderRangeOpened=false; linePayFormalScheduled=false
+        LinePayDiagnosticStore.clear(this)
+        val pending=old.count{!it.detailChecked}
+        if(fullHistory)
+            log("=== V2.41 LINE Pay 完整歷史同步開始：既有=${old.size}、待補明細=$pending ===")
+        else
+            log("=== V2.41 LINE Pay 快速同步開始：既有=${old.size}、舊待補=$pending；本模式只抓最新/目前可見待補，不為舊待補掃完整歷史 ===")
+        launchLineForPay()
+        h.postDelayed({ captureLinePayDiagnostic(null); autoNavigateLinePay(); scheduleLinePayFormal(120) },1200)
+        val timeout=if(fullHistory) 1200000L else 300000L
+        h.postDelayed({
+            if(linePayFormalMode){
+                log("⚠ V2.41 LINE Pay ${if(linePayFullHistoryMode) "完整歷史" else "快速"}同步達安全上限；保留目前資料後停止")
+                stopLinePayFormal(returnToApp=true)
+            }
+        },timeout)
+    }
+
+    private fun launchLineForPay(){
+        val launch = packageManager.getLaunchIntentForPackage(LINE_APP)
+            ?: packageManager.getLaunchIntentForPackage(LINE_PAY)
+        if(launch==null){
+            linePayDiagnosticRunning=false; linePayFormalMode=false
+            log("⚠ 找不到 LINE / LINE Pay App；已檢查 package=$LINE_APP 與 $LINE_PAY")
+            return
+        }
+        launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
+        startActivity(launch)
+        h.postDelayed({ captureLinePayDiagnostic(null); autoNavigateLinePay() },1200)
+    }
+
+    private fun processLinePayFormal(){
+        if(!linePayDiagnosticRunning || !linePayFormalMode) return
+        val root=rootInActiveWindow ?: return
+        val pkg=root.packageName?.toString().orEmpty()
+        if(pkg!=LINE_APP && pkg!=LINE_PAY) return
+        val text=visibleTexts(root).joinToString("\n")
+
+        if(linePayCurrentDetailKey.isNotBlank()){
+            val elapsed=System.currentTimeMillis()-linePayDetailClickedAt
+            val detailVisible=text.contains("付款詳細資訊") || text.contains("交易資訊") || text.contains("付款方式")
+            if(detailVisible && !linePayReturnPending){
+                val detail=parseLinePayDetail(root)
+                if(detail.paymentMethod.isNotBlank()){
+                    if(!linePayDetailSuccessCommitted){
+                        val ok=LinePayTransactionStore.updateDetail(this,linePayCurrentDetailKey,detail)
+                        if(ok) linePayDetailsThisRun++
+                        linePayDetailSuccessCommitted=true
+                        log("✓ V2.41 LINE Pay 明細解析 key=$linePayCurrentDetailKey payment=${detail.paymentMethod} bank=${detail.bank} card=${detail.cardType}/${detail.cardLast4} actual=${detail.actualPaid}")
+                    }
+                    captureLinePayDiagnostic(null)
+                    linePayReturnPending=true
+                    performGlobalAction(GLOBAL_ACTION_BACK)
+                    scheduleLinePayFormal(900)
+                    return
+                }
+                linePayDetailParseAttempts++
+                if(elapsed < 3200L){
+                    if(linePayDetailParseAttempts==1 || linePayDetailParseAttempts%3==0)
+                        log("… V2.41 LINE Pay 明細載入中 elapsed=${elapsed}ms attempt=$linePayDetailParseAttempts key=$linePayCurrentDetailKey")
+                    scheduleLinePayFormal(450)
+                    return
+                }
+                log("⚠ V2.41 LINE Pay 明細等待超過 3.2 秒仍沒有付款方式；本筆保持待補並返回 key=$linePayCurrentDetailKey")
+                linePayReturnPending=true
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                scheduleLinePayFormal(900)
+                return
+            }
+            if(linePayReturnPending){
+                if(lineNavStage>=3 && isLinePayHistoryListPage(root) && parseLinePayTransactions(linePayHistoryTexts(root)).isNotEmpty()){
+                    val finished=linePayCurrentDetailKey
+                    linePayCurrentDetailKey=""; linePayDetailClickedAt=0L; linePayDetailParseAttempts=0
+                    linePayReturnPending=false; linePayDetailSuccessCommitted=false
+                    log("← V2.41 LINE Pay 已返回歷史交易列表；完成 key=$finished")
+                    scheduleLinePayFormal(350)
+                    return
+                }
+                scheduleLinePayFormal(400)
+                return
+            }
+            if(elapsed>7000L){
+                log("⚠ V2.41 LINE Pay 點擊後 7 秒仍未辨識到明細頁；本筆保持待補並返回")
+                linePayReturnPending=true
+                performGlobalAction(GLOBAL_ACTION_BACK)
+                scheduleLinePayFormal(900)
+            } else scheduleLinePayFormal(450)
+            return
+        }
+
+        if(!linePayHistoryEntered || lineNavStage<3) return
+        val isLiff=isLinePayLiffContext(root)
+        if(isLiff) linePayHistoryLiffSeen=true
+
+        val historyItems=linePayHistoryTexts(root)
+        val homePreview=isLinePayHomePreview(root)
+        val explicitHistory=isLinePayHistoryListPage(root)
+        val hasHistorySignals=hasLinePayHistoryTransactionSignals(historyItems)
+        val parsed=if(homePreview) emptyList() else parseLinePayTransactionRows(root).map{it.tx}
+
+        if(explicitHistory && historyItems.size>=10 && hasHistorySignals && linePayHistoryEmptyPolls>=0){
+            if(linePayHistoryEmptyPolls>0){
+                log("✓ V2.41 HISTORY_LOADING → HISTORY_SCAN：explicit=true texts=${historyItems.size} signals=true preview=${historyItems.take(40).joinToString(" | ")}")
+            }
+            linePayHistoryEmptyPolls=0
+        } else if(parsed.isEmpty()){
+            linePayHistoryEmptyPolls++
+            val now=System.currentTimeMillis()
+            if(now-linePayHistoryLastCaptureAt>1800L){
+                linePayHistoryLastCaptureAt=now
+                captureLinePayDiagnostic(null)
+            }
+            if(linePayHistoryEmptyPolls==1 || linePayHistoryEmptyPolls%5==0){
+                log("… V2.41 LINE Pay HISTORY_LOADING polls=$linePayHistoryEmptyPolls liff=$isLiff explicit=$explicitHistory signals=$hasHistorySignals texts=${historyItems.size} sample=${historyItems.take(18).joinToString(" | ")}")
+            }
+            if(now-linePayHistoryOpenedAt < (if(isLiff) 30000L else 20000L)){
+                scheduleLinePayFormal(500)
+                return
+            }
+            if(!isLiff && isLinePayHomePreview(root) && linePayHistoryReopenAttempts<2){
+                linePayHistoryReopenAttempts++
+                log("↻ V2.41 LINE Pay 歷史 LIFF 尚未提供交易文字；重新點『交易紀錄』 attempt=$linePayHistoryReopenAttempts")
+                linePayHistoryEntered=false
+                lineNavStage=2
+                lineNavAttempts=0
+                h.postDelayed({ autoNavigateLinePay() },500)
+                return
+            }
+            log("⚠ V2.41 LINE Pay 已進入歷史流程但 30 秒仍沒有可辨識交易訊號；保留診斷資料並停止")
+            stopLinePayFormal(returnToApp=true)
+            return
+        }
+
+        if(parsed.isEmpty()){
+            log("⚠ V2.41 已切入 HISTORY_SCAN，但 parser 仍為 0；historyTexts=${historyItems.take(60).joinToString(" | ")}")
