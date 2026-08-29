@@ -6,10 +6,16 @@ object GoogleWalletSyncControllerV3 {
     fun isRunning(): Boolean = GoogleWalletSyncControllerV74.isRunning()
 
     @JvmStatic
-    fun start(s: PayAccessibilityService) = GoogleWalletSyncControllerV74.start(s)
+    fun start(s: PayAccessibilityService) {
+        GoogleWalletSyncControllerV74.start(s)
+        GoogleWalletCardBackfillObserver.start(s)
+    }
 
     @JvmStatic
-    fun stop(returnToApp: Boolean = true) = GoogleWalletSyncControllerV74.stop(returnToApp)
+    fun stop(returnToApp: Boolean = true) {
+        GoogleWalletCardBackfillObserver.stop()
+        GoogleWalletSyncControllerV74.stop(returnToApp)
+    }
 
     @JvmStatic
     fun poke() = GoogleWalletSyncControllerV74.poke()
