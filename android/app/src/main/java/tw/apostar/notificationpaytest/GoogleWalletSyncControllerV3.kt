@@ -9,10 +9,12 @@ object GoogleWalletSyncControllerV3 {
     fun start(s: PayAccessibilityService) {
         GoogleWalletSyncControllerV74.start(s)
         GoogleWalletCardBackfillObserver.start(s)
+        GoogleWalletSelectedCardBackfillObserver.start(s)
     }
 
     @JvmStatic
     fun stop(returnToApp: Boolean = true) {
+        GoogleWalletSelectedCardBackfillObserver.stop()
         GoogleWalletCardBackfillObserver.stop()
         GoogleWalletSyncControllerV74.stop(returnToApp)
     }
