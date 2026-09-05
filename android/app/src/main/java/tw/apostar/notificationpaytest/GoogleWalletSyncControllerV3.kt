@@ -7,15 +7,16 @@ object GoogleWalletSyncControllerV3 {
 
     @JvmStatic
     fun start(s: PayAccessibilityService) {
+        // Card-specific history scanning is owned by V74's single state machine.
+        // Keep only the detail OCR observer; do not run a second navigation state machine.
         GoogleWalletSyncControllerV74.start(s)
         GoogleWalletCardBackfillObserver.start(s)
-        GoogleWalletSelectedCardBackfillObserver.start(s)
     }
 
     @JvmStatic
     fun stop(returnToApp: Boolean = true) {
-        GoogleWalletSelectedCardBackfillObserver.stop()
         GoogleWalletCardBackfillObserver.stop()
+        GoogleWalletSelectedCardBackfillObserver.stop()
         GoogleWalletSyncControllerV74.stop(returnToApp)
     }
 
