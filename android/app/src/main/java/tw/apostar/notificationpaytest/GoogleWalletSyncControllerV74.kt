@@ -56,6 +56,7 @@ object GoogleWalletSyncControllerV74 {
     private var cardPage = 0
     private var cardLastFp = ""
     private var cardNoMove = 0
+    private var cardOpenTry = 0
 
     @JvmStatic fun isRunning(): Boolean = running
 
@@ -85,6 +86,7 @@ object GoogleWalletSyncControllerV74 {
         cardPage = 0
         cardLastFp = ""
         cardNoMove = 0
+        cardOpenTry = 0
 
         val dedup = GoogleWalletTransactionStore.compactLegacyGlobalHistory(s)
         val pruned = GoogleWalletTransactionStore.pruneUnresolvedOlderThan(s, RECENT_DAYS)
@@ -147,11 +149,17 @@ object GoogleWalletSyncControllerV74 {
             cardPage = 0
             cardLastFp = ""
             cardNoMove = 0
+            cardOpenTry = 0
             val node = findCardNode(root, currentCard!!)
             if (node != null) {
                 state = CARD_OPEN
-                schedule(900)
-                tapNode(s, node, "card-${currentCard!!.last4}", true)
+                schedule(1100)
+                // ACTION_CLICK returning true only means the Accessibility action was
+                // accepted. It does NOT mean Google Wallet actually navigated. The
+                // v84 diagnostic showed exactly this: accepted=true, then immediate
+                // return to the same Wallet home. Force a real screen-coordinate tap.
+                record(s, "v84-card-gesture-start", "last4=${currentCard!!.last4}")
+                tapAt(s, node, .50f, "card-${currentCard!!.last4}-gesture")
                 return
             }
             record(s, "v84-card-node-missing", "index=$cardIndex last4=${currentCard!!.last4}")
@@ -168,26 +176,59 @@ object GoogleWalletSyncControllerV74 {
     private fun onCardOpen(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
         val card = currentCard ?: run { state = HOME; schedule(); return }
         val vals = texts(root)
-        val selected = vals.firstOrNull { extractLast4FromText(it) == card.last4 }
+        val selected = vals.firstOrNull { extractLast4FromText(it) == card.last4 || compactLast4(it) == card.last4 }
         val rows = parseRows(root)
         val more = findExact(root, "查看更多交易")
-        if (rows.isNotEmpty() || more != null) {
-            if (selected != null) record(s, "v84-card-selected", "index=$cardIndex bank=${inferBank(card.name)} last4=${card.last4} name=${card.name}")
-            if (more != null) {
-                state = CARD_HISTORY
-                cardPage = 0
-                cardLastFp = ""
-                cardNoMove = 0
-                schedule(850)
-                tapNode(s, more, "card-more-${card.last4}", false)
-                return
-            }
+        val historyText = findExact(root, "交易記錄") ?: findExact(root, "交易")
+
+        if (selected != null) {
+            record(s, "v84-card-selected", "index=$cardIndex bank=${inferBank(card.name)} last4=${card.last4} name=${card.name} text=$selected")
+        }
+
+        if (more != null) {
+            state = CARD_HISTORY
+            cardPage = 0
+            cardLastFp = ""
+            cardNoMove = 0
+            schedule(850)
+            tapNode(s, more, "card-more-${card.last4}", false)
+            return
+        }
+
+        if (historyText != null && selected != null) {
+            state = CARD_HISTORY
+            cardPage = 0
+            cardLastFp = ""
+            cardNoMove = 0
+            schedule(850)
+            tapNode(s, historyText, "card-history-${card.last4}", false)
+            return
+        }
+
+        if (rows.isNotEmpty() && selected != null) {
             state = CARD_HISTORY
             schedule(500)
             return
         }
-        if (vals.any { it == "付款卡" || it == "卡片詳細資料" }) { schedule(500); return }
-        schedule()
+
+        // Google Wallet may keep the same accessibility tree for several hundred ms
+        // after the physical tap. Retry the coordinate tap rather than spinning forever.
+        cardOpenTry++
+        record(s, "v84-card-open-wait", "index=$cardIndex last4=${card.last4} try=$cardOpenTry values=${vals.take(18).joinToString(" | ")}")
+        if (cardOpenTry <= 5) {
+            val node = findCardNode(root, card) ?: findNodeContaining(root, card.last4)
+            if (node != null) {
+                schedule(900)
+                tapAt(s, node, when (cardOpenTry % 3) { 1 -> .50f; 2 -> .35f; else -> .65f }, "card-${card.last4}-retry-$cardOpenTry")
+                return
+            }
+            schedule(700)
+            return
+        }
+
+        // Do not let a failed card navigation block the entire Google Pay sync.
+        record(s, "v84-card-open-failed", "index=$cardIndex last4=${card.last4} retry=$cardOpenTry")
+        finishCurrentCard(s)
     }
 
     private fun onCardHistory(s: PayAccessibilityService, root: AccessibilityNodeInfo) {
@@ -237,6 +278,7 @@ object GoogleWalletSyncControllerV74 {
         cardPage = 0
         cardLastFp = ""
         cardNoMove = 0
+        cardOpenTry = 0
         state = HOME
         schedule(1100)
         back(s, "card-history-finish")
@@ -394,7 +436,7 @@ object GoogleWalletSyncControllerV74 {
             GoogleWalletTransactionStore.merge(s, keep)
             keep.forEach { tx ->
                 val old = before["${tx.date.substringBefore(' ')}|${tx.amount}"]
-                if (old != null && old.shop != tx.shop && old.shop.trim().length <= 2 && tx.shop.trim().length < tx.shop.trim().length) record(s, "v78-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
+                if (old != null && old.shop != tx.shop && old.shop.trim().length <= 2) record(s, "v78-merchant-repair", "${old.fallbackKey} -> ${tx.fallbackKey}")
             }
         }
     }
@@ -434,8 +476,28 @@ object GoogleWalletSyncControllerV74 {
     private fun extractId(root: AccessibilityNodeInfo, vals: List<String>): String { try{root.findAccessibilityNodeInfosByViewId("$GMS:id/UserVisibleTransactionId")?.firstOrNull()?.text?.toString()?.trim()?.takeIf{it.isNotBlank()}?.let{return it}}catch(_:Throwable){};val i=vals.indexOfFirst{it=="交易 ID"||it.equals("Transaction ID",true)};return if(i>=0&&i+1<vals.size)vals[i+1].trim() else "" }
     private fun extractTime(date:String,vals:List<String>):String?{val r=Regex("(?i)(上午|下午|AM|PM)?\\s*(\\d{1,2})[:：](\\d{2})(?:[:：](\\d{2}))?");for(v in vals){val mm=r.find(v)?:continue;val period=mm.groupValues[1].uppercase(Locale.US);var h=mm.groupValues[2].toIntOrNull()?:continue;val min=mm.groupValues[3].toIntOrNull()?:continue;val sec=mm.groupValues[4].toIntOrNull()?:0;if((period=="下午"||period=="PM")&&h in 1..11)h+=12;if((period=="上午"||period=="AM")&&h==12)h=0;return String.format(Locale.US,"%s %02d:%02d:%02d",date.substringBefore(' '),h,min,sec)};return null}
 
-    private fun findCardNode(root:AccessibilityNodeInfo,card:Card):AccessibilityNodeInfo?{val nodes=try{root.findAccessibilityNodeInfosByViewId("$WALLET:id/Card")?:emptyList()}catch(_:Throwable){emptyList()};return nodes.firstOrNull{n->texts(n).any{extractLast4FromText(it)==card.last4}}}
+    private fun findCardNode(root:AccessibilityNodeInfo,card:Card):AccessibilityNodeInfo?{
+        val nodes=try{root.findAccessibilityNodeInfosByViewId("$WALLET:id/Card")?:emptyList()}catch(_:Throwable){emptyList()}
+        nodes.firstOrNull{n->texts(n).any{extractLast4FromText(it)==card.last4||compactLast4(it)==card.last4}}?.let{return it}
+        return findNodeContaining(root, card.last4)
+    }
+
+    private fun findNodeContaining(root:AccessibilityNodeInfo, last4:String):AccessibilityNodeInfo?{
+        var found:AccessibilityNodeInfo?=null
+        fun walk(n:AccessibilityNodeInfo?,d:Int){
+            if(n==null||d>30||found!=null)return
+            try{
+                val joined=texts(n).joinToString(" ")
+                if(joined.contains(last4) && (n.isClickable || n.className?.toString()?.contains("Card",true)==true)){found=n;return}
+                for(i in 0 until n.childCount)walk(n.getChild(i),d+1)
+            }catch(_:Throwable){}
+        }
+        walk(root,0)
+        return found
+    }
+
     private fun extractLast4FromText(raw:String):String{val compact=raw.replace(Regex("[\\s\\u00a0\\u200b\\u200e\\u200f]"),"");return Regex("末位數號碼為([0-9]{4})").find(compact)?.groupValues?.getOrNull(1).orEmpty()}
+    private fun compactLast4(raw:String):String{val compact=raw.replace(Regex("[\\s\\u00a0\\u200b\\u200e\\u200f]"),"");return Regex("(?:••|··|●●|•{2})([0-9]{4})").find(compact)?.groupValues?.getOrNull(1).orEmpty()}
 
     private fun findCards(root:AccessibilityNodeInfo):List<Card>{val nodes=try{root.findAccessibilityNodeInfosByViewId("$WALLET:id/Card")?:emptyList()}catch(_:Throwable){emptyList()};return nodes.mapNotNull{n->val desc=texts(n).firstOrNull{it.startsWith("末位數號碼為")}?:return@mapNotNull null;val last4=Regex("末位數號碼為\\s*([0-9 ]+)").find(desc)?.groupValues?.getOrNull(1)?.filter{it.isDigit()}?.takeLast(4).orEmpty();if(last4.length!=4)return@mapNotNull null;var name=desc.substringAfter("的 ",desc).removeSuffix("卡片。").removeSuffix("卡片").trim();val type=normalizeCard(name);if(type in setOf("Mastercard","Visa","JCB"))name=name.replace("Mastercard","",true).replace("Visa","",true).replace("JCB","",true).replace("萬事達","",true).trim();Card(name,last4,if(type in setOf("Mastercard","Visa","JCB"))type else "")}.distinctBy{it.last4}}
     private fun normalizeCard(v:String):String=when{v.contains("Mastercard",true)||v.contains("萬事達")->"Mastercard";v.contains("Visa",true)->"Visa";v.contains("JCB",true)->"JCB";else->v.trim()}
